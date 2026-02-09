@@ -37,7 +37,11 @@ python -m iop_lsp --stdio
 uv run python -m iop_lsp --stdio --log-file /tmp/iop-lsp.log -v
 ```
 
-## Helix Integration
+## Editor Integration
+
+The LSP server uses standard LSP over stdio and works with any editor.
+
+### Helix
 
 Add to `~/.config/helix/languages.toml`:
 
@@ -59,6 +63,36 @@ language-servers = ["iop-lsp"]
 
 Then in Helix:
 - `gd` — Go to definition (on a type reference)
+- `K` — Show hover documentation
+
+### Neovim
+
+With [nvim-lspconfig](https://github.com/neovim/nvim-lspconfig), add to your
+Neovim configuration:
+
+```lua
+vim.api.nvim_create_autocmd('FileType', {
+  pattern = 'iop',
+  callback = function()
+    vim.lsp.start({
+      name = 'iop-lsp',
+      cmd = { 'uv', 'run', '--project', '/path/to/lib-common/tools/iop-lsp',
+              'python', '-m', 'iop_lsp', '--stdio' },
+      root_dir = vim.fs.root(0, { '.git' }),
+    })
+  end,
+})
+
+-- Register .iop file type
+vim.filetype.add({
+  extension = {
+    iop = 'iop',
+  },
+})
+```
+
+Then in Neovim:
+- `gd` — Go to definition
 - `K` — Show hover documentation
 
 ## Testing
