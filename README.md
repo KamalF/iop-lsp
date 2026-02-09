@@ -15,7 +15,7 @@ uv sync    # Creates .venv and installs all dependencies
 ```
 
 The `pyproject.toml` references `tree-sitter-iop` as a local path dependency
-(`../../../tree-sitter-iop`). Adjust if your checkout is elsewhere.
+(`../tree-sitter-iop`). Adjust if your checkout is elsewhere.
 
 ### With pip
 
