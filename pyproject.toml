@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=42", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "iop-lsp"
+version = "0.1.0"
+description = "LSP server for IOP files"
+requires-python = ">=3.9"
+dependencies = [
+    "pygls>=2.0",
+    "tree-sitter>=0.23",
+    "tree-sitter-iop>=0.0.1",
+]
+
+[project.scripts]
+iop-lsp = "iop_lsp.server:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=7.0",
+]
+
+[tool.uv]
+python-preference = "only-system"
+
+[tool.uv.sources]
+tree-sitter-iop = { path = "../github/tree-sitter-iop" }
+
+[tool.ruff]
+line-length = 78
+quote-style = "single"
