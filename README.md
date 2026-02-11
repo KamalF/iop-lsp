@@ -43,8 +43,13 @@ root to build a symbol table used for go-to-definition and hover.
 
 ### Neovim
 
-No plugins required — Neovim ≥ 0.11 has built-in LSP support.  Add the
-following to your Neovim configuration (e.g., `~/.config/nvim/init.lua`):
+No plugins required — Neovim ≥ 0.11 has built-in LSP support.
+
+**Quick install:** run `./install-nvim-iop-lsp.sh` to automatically
+configure your `~/.vimrc` (use `--uninstall` to revert).
+
+**Manual setup:** add the following to your Neovim configuration
+(e.g., `~/.config/nvim/init.lua`):
 
 ```lua
 -- Teach Neovim about the .iop file extension.
@@ -83,21 +88,18 @@ vim.api.nvim_create_autocmd('FileType', {
   share the same `root_dir`, so opening multiple `.iop` files in the same
   project is efficient.
 
-**Default keybindings** (built into Neovim):
+**Keybindings:**  Neovim ≥ 0.11 maps `K` to hover automatically.
+Go-to-definition must be mapped manually (e.g., via an `LspAttach`
+autocmd or your editor distribution's LSP keybindings).  The built-in
+`gd` is Vim's "go to local declaration" and does **not** call the LSP.
 
-| Key  | Action                        |
-|------|-------------------------------|
-| `gd` | Go to definition              |
-| `K`  | Hover (type info + doc)       |
-| `grn`| Rename symbol                 |
-| `grr`| Show references               |
-
-For diagnostics, add to your config:
+Example keybindings:
 
 ```lua
 vim.api.nvim_create_autocmd('LspAttach', {
     callback = function(args)
         local opts = { buffer = args.buf }
+        vim.keymap.set('n', 'gd', vim.lsp.buf.definition, opts)
         vim.keymap.set('n', '<leader>e', vim.diagnostic.open_float, opts)
         vim.keymap.set('n', '[d', vim.diagnostic.goto_prev, opts)
         vim.keymap.set('n', ']d', vim.diagnostic.goto_next, opts)
