@@ -4,6 +4,9 @@ Language Server Protocol implementation for `.iop` files, providing:
 
 - **Go-to-definition** — jump from a type reference to its definition
 - **Hover documentation** — show doc comments and type info on hover
+- **C file support** — go-to-definition and hover for IOP-generated C
+  identifiers (e.g., `tstiop__my_struct_a__t` → `tstiop.MyStructA` in the
+  `.iop` source)
 
 ## Prerequisites
 
@@ -129,6 +132,56 @@ vim.api.nvim_create_autocmd('FileType', {
 })
 ```
 
+### C file support (go-to-definition for IOP types in C)
+
+When you use IOP-generated types in C code (e.g., `tstiop__my_struct_a__t`),
+iop-lsp can resolve them back to their `.iop` source definitions.  This works
+for `.c`, `.h`, and `.blk` files.
+
+To enable this, configure your editor to attach iop-lsp to C files **before**
+clangd.  iop-lsp only responds for identifiers it recognizes (IOP C names)
+and returns `null` for everything else, so the editor falls back to clangd
+for normal C symbols.
+
+#### Neovim
+
+Add `c` and `h` to the FileType pattern so iop-lsp attaches to C files too:
+
+```lua
+vim.api.nvim_create_autocmd('FileType', {
+    pattern = { 'iop', 'c' },
+    callback = function()
+        vim.lsp.start({
+            name = 'iop-lsp',
+            cmd = {
+                'uv', 'run',
+                '--project', '/path/to/iop-lsp',
+                'python', '-m', 'iop_lsp', '--stdio',
+            },
+            root_dir = vim.fs.root(0, { '.git' }),
+        })
+    end,
+})
+```
+
+When both iop-lsp and clangd are attached, Neovim sends requests to all
+servers.  To ensure iop-lsp takes priority for go-to-definition on IOP types,
+list it first in `vim.lsp.enable()` or use a custom `gd` keymap that prefers
+iop-lsp.
+
+#### Helix
+
+List `iop-lsp` before `clangd` in the `language-servers` array for C:
+
+```toml
+[[language]]
+name = "c"
+language-servers = ["iop-lsp", "clangd"]
+```
+
+The first server in the array gets priority per-feature, so iop-lsp
+results are preferred when available.
+
 ### Helix
 
 Add to `~/.config/helix/languages.toml`:
@@ -164,6 +217,7 @@ uv run python -m pytest tests/ -v
 - `iop_lsp/server.py` — LSP server, request handlers
 - `iop_lsp/indexer.py` — Parse .iop files with tree-sitter, build symbol table
 - `iop_lsp/symbols.py` — Symbol data structures
+- `iop_lsp/c_mapping.py` — IOP ↔ C name conversions (CamelCase ↔ snake_case)
 - `iop_lsp/doc_comments.py` — Extract doc comments from AST
 - `iop_lsp/schema.py` — IOP type resolution for YAML support
 - `iop_lsp/yaml_support.py` — YAML parsing and cursor-to-type mapping
