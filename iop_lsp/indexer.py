@@ -15,6 +15,7 @@ from .doc_comments import (
     get_field_doc_comment,
     get_trailing_doc_comment,
 )
+from .c_mapping import C_TYPE_SUFFIXES, iop_type_to_c
 from .symbols import (
     EnumValueSymbol,
     FieldSymbol,
@@ -91,6 +92,8 @@ class SymbolIndex:
     by_file: dict[str, list[Symbol]] = field(default_factory=dict)
     # file path -> package name
     package_of_file: dict[str, str] = field(default_factory=dict)
+    # C identifier base name -> symbol (e.g., 'tstiop__my_struct_a' -> Symbol)
+    by_c_name: dict[str, Symbol] = field(default_factory=dict)
 
     def resolve(
         self,
@@ -162,6 +165,17 @@ class SymbolIndex:
         self.by_qualified_name[sym.qualified_name] = sym
         self.by_package.setdefault(sym.package, []).append(sym)
         self.by_file.setdefault(sym.file, []).append(sym)
+        # Index by C name
+        c_name = iop_type_to_c(sym.qualified_name)
+        self.by_c_name[c_name] = sym
+        # Also index @ctype override if present
+        if sym.ctype:
+            ctype_base = sym.ctype
+            for suffix in C_TYPE_SUFFIXES:
+                if ctype_base.endswith(suffix):
+                    ctype_base = ctype_base[:-len(suffix)]
+                    break
+            self.by_c_name[ctype_base] = sym
 
     def remove_file(self, filepath: str) -> None:
         """Remove all symbols from a file."""
@@ -185,6 +199,26 @@ class SymbolIndex:
                 ]
                 if not self.by_package[pkg]:
                     del self.by_package[pkg]
+            # Remove from by_c_name
+            c_name = iop_type_to_c(sym.qualified_name)
+            self.by_c_name.pop(c_name, None)
+            if sym.ctype:
+                ctype_base = sym.ctype
+                for suffix in C_TYPE_SUFFIXES:
+                    if ctype_base.endswith(suffix):
+                        ctype_base = ctype_base[:-len(suffix)]
+                        break
+                self.by_c_name.pop(ctype_base, None)
+
+    def resolve_c_identifier(self, c_ident: str) -> Optional[Symbol]:
+        """Resolve a C identifier like 'tstiop__my_struct_a__t' to an IOP symbol."""
+        # Strip known C type suffixes
+        base = c_ident
+        for suffix in C_TYPE_SUFFIXES:
+            if base.endswith(suffix):
+                base = base[:-len(suffix)]
+                break
+        return self.by_c_name.get(base)
 
 
 class Indexer:
@@ -299,6 +333,9 @@ class Indexer:
                 if inh_id:
                     parent_class = _node_text(inh_id)
 
+        # Parse @ctype attribute if present
+        ctype = self._extract_ctype(node)
+
         sym = Symbol(
             name=name,
             qualified_name=qualified_name,
@@ -308,6 +345,7 @@ class Indexer:
             doc=doc,
             package=package,
             parent_class=parent_class,
+            ctype=ctype,
         )
 
         # Extract children based on kind
@@ -342,6 +380,21 @@ class Indexer:
                     sym.typedef_source = _node_text(type_node)
 
         return sym
+
+    def _extract_ctype(self, node: ts.Node) -> Optional[str]:
+        """Extract @ctype(name) attribute value from a definition node."""
+        for child in node.children:
+            if child.type != 'attribute':
+                continue
+            # attribute children: '@', identifier?, attribute_argument_list?
+            attr_id = _find_child(child, 'identifier')
+            if attr_id and _node_text(attr_id) == 'ctype':
+                arg_list = _find_child(child, 'attribute_argument_list')
+                if arg_list:
+                    content = _find_child(arg_list, 'attribute_content')
+                    if content:
+                        return _node_text(content).strip()
+        return None
 
     def _extract_fields(
         self, block: ts.Node
