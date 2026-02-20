@@ -129,6 +129,32 @@ vim.api.nvim_create_autocmd('FileType', {
 })
 ```
 
+### Emacs
+
+Emacs ≥ 29 ships with [Eglot](https://www.gnu.org/software/emacs/manual/html_mono/eglot.html),
+a built-in LSP client.  The easiest way to run both `clangd` and
+`iop-lsp` on the same buffer is to use
+[rassumfrassum](https://github.com/joaotavora/rassumfrassum/), an LSP
+multiplexer.
+
+Create a rassumfrassum preset (e.g. `~/.config/rass/presets/cmode-iop.py`):
+
+```python
+def servers():
+    return [
+        ['clangd'],
+        ['uv', 'run', '--project', '/path/to/iop-lsp', '-m', 'iop_lsp',
+         '--stdio']
+    ]
+```
+
+Then register the preset with Eglot:
+
+```lisp
+(add-to-list 'eglot-server-programs
+             '((c++-mode c-mode) . ("rass" "cmode-iop")))
+```
+
 ### Helix
 
 Add to `~/.config/helix/languages.toml`:
