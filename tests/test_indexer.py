@@ -288,6 +288,141 @@ class TestIndexer(unittest.TestCase):
         self.assertEqual(rpc.throw_type, 'Err')
 
 
+class TestCIdentifierResolution(unittest.TestCase):
+    def setUp(self):
+        self.indexer = Indexer()
+
+    def _index_source(self, source: str, filename: str = '/test.iop'):
+        self.indexer.index_source(filename, source.encode('utf-8'))
+
+    def test_resolve_with_t_suffix(self):
+        self._index_source(
+            'package tstiop;\n'
+            'struct MyStructA {};'
+        )
+        sym = self.indexer.index.resolve_c_identifier(
+            'tstiop__my_struct_a__t'
+        )
+        self.assertIsNotNone(sym)
+        self.assertEqual(sym.qualified_name, 'tstiop.MyStructA')
+
+    def test_resolve_with_s_suffix(self):
+        self._index_source(
+            'package tstiop;\n'
+            'struct MyStructA {};'
+        )
+        sym = self.indexer.index.resolve_c_identifier(
+            'tstiop__my_struct_a__s'
+        )
+        self.assertIsNotNone(sym)
+        self.assertEqual(sym.qualified_name, 'tstiop.MyStructA')
+
+    def test_resolve_enum_with_e_suffix(self):
+        self._index_source(
+            'package tstiop;\n'
+            'enum MyEnum { A, };'
+        )
+        sym = self.indexer.index.resolve_c_identifier(
+            'tstiop__my_enum__e'
+        )
+        self.assertIsNotNone(sym)
+        self.assertEqual(sym.kind, SymbolKind.ENUM)
+
+    def test_resolve_array_suffix(self):
+        self._index_source(
+            'package tstiop;\n'
+            'struct MyStructA {};'
+        )
+        sym = self.indexer.index.resolve_c_identifier(
+            'tstiop__my_struct_a__array_t'
+        )
+        self.assertIsNotNone(sym)
+        self.assertEqual(sym.qualified_name, 'tstiop.MyStructA')
+
+    def test_resolve_opt_suffix(self):
+        self._index_source(
+            'package tstiop;\n'
+            'struct MyStructA {};'
+        )
+        sym = self.indexer.index.resolve_c_identifier(
+            'tstiop__my_struct_a__opt_t'
+        )
+        self.assertIsNotNone(sym)
+
+    def test_resolve_no_suffix(self):
+        """Bare C name without suffix should also resolve."""
+        self._index_source(
+            'package tstiop;\n'
+            'struct MyStructA {};'
+        )
+        sym = self.indexer.index.resolve_c_identifier(
+            'tstiop__my_struct_a'
+        )
+        self.assertIsNotNone(sym)
+
+    def test_resolve_unknown_returns_none(self):
+        self._index_source(
+            'package tstiop;\n'
+            'struct MyStructA {};'
+        )
+        sym = self.indexer.index.resolve_c_identifier(
+            'unknown__type__t'
+        )
+        self.assertIsNone(sym)
+
+    def test_resolve_nested_package(self):
+        self._index_source(
+            'package test.dso;\n'
+            'struct ClassDso {};'
+        )
+        sym = self.indexer.index.resolve_c_identifier(
+            'test__dso__class_dso__t'
+        )
+        self.assertIsNotNone(sym)
+        self.assertEqual(sym.qualified_name, 'test.dso.ClassDso')
+
+    def test_ctype_override(self):
+        self._index_source(
+            'package core;\n'
+            '@ctype(http_code__t)\n'
+            'enum HttpCode {\n'
+            '    OK = 200,\n'
+            '};'
+        )
+        # Should be resolvable by the @ctype name
+        sym = self.indexer.index.resolve_c_identifier('http_code__t')
+        self.assertIsNotNone(sym)
+        self.assertEqual(sym.qualified_name, 'core.HttpCode')
+        self.assertEqual(sym.ctype, 'http_code__t')
+
+    def test_ctype_override_also_resolves_normal(self):
+        """Normal C name should still work alongside @ctype."""
+        self._index_source(
+            'package core;\n'
+            '@ctype(http_code__t)\n'
+            'enum HttpCode {\n'
+            '    OK = 200,\n'
+            '};'
+        )
+        sym = self.indexer.index.resolve_c_identifier('core__http_code__e')
+        self.assertIsNotNone(sym)
+        self.assertEqual(sym.qualified_name, 'core.HttpCode')
+
+    def test_remove_file_cleans_c_name(self):
+        self._index_source(
+            'package foo;\n'
+            'struct Bar {};',
+            '/a.iop',
+        )
+        self.assertIsNotNone(
+            self.indexer.index.resolve_c_identifier('foo__bar__t')
+        )
+        self.indexer.index.remove_file('/a.iop')
+        self.assertIsNone(
+            self.indexer.index.resolve_c_identifier('foo__bar__t')
+        )
+
+
 class TestDocComments(unittest.TestCase):
     def setUp(self):
         self.indexer = Indexer()

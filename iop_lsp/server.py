@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import re
 from typing import Optional
 
 import tree_sitter as ts
@@ -40,6 +41,32 @@ def _uri_to_path(uri: str) -> str:
     if uri.startswith('file://'):
         return uri[7:]
     return uri
+
+
+_C_WORD_RE = re.compile(r'[a-zA-Z_][a-zA-Z0-9_]*')
+
+# File extensions treated as C files for IOP identifier resolution
+_C_EXTENSIONS = ('.c', '.h', '.blk')
+
+
+def _is_c_file(uri: str) -> bool:
+    """Check if a URI refers to a C/header/blk file."""
+    path = _uri_to_path(uri).lower()
+    return any(path.endswith(ext) for ext in _C_EXTENSIONS)
+
+
+def _get_word_at_position(
+    text: str, line: int, col: int,
+) -> Optional[str]:
+    """Extract the C identifier at (line, col) from raw text."""
+    lines = text.split('\n')
+    if line < 0 or line >= len(lines):
+        return None
+    ln = lines[line]
+    for m in _C_WORD_RE.finditer(ln):
+        if m.start() <= col <= m.end():
+            return m.group()
+    return None
 
 
 def _node_at_position(
@@ -205,6 +232,16 @@ def goto_definition(
     line = params.position.line
     col = params.position.character
 
+    # C file path: extract word at cursor, resolve as IOP C identifier
+    if _is_c_file(uri):
+        doc = server.workspace.get_text_document(uri)
+        word = _get_word_at_position(doc.source, line, col)
+        if word:
+            sym = indexer.index.resolve_c_identifier(word)
+            if sym:
+                return _symbol_to_location(sym)
+        return None
+
     tree = _get_tree(uri)
     if tree is None:
         return None
@@ -259,6 +296,21 @@ def hover(params: lsp.HoverParams) -> Optional[lsp.Hover]:
     uri = params.text_document.uri
     line = params.position.line
     col = params.position.character
+
+    # C file path: extract word at cursor, resolve as IOP C identifier
+    if _is_c_file(uri):
+        doc = server.workspace.get_text_document(uri)
+        word = _get_word_at_position(doc.source, line, col)
+        if word:
+            sym = indexer.index.resolve_c_identifier(word)
+            if sym:
+                return lsp.Hover(
+                    contents=lsp.MarkupContent(
+                        kind=lsp.MarkupKind.Markdown,
+                        value=_format_symbol_hover(sym),
+                    ),
+                )
+        return None
 
     tree = _get_tree(uri)
     if tree is None:

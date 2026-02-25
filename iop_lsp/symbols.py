@@ -71,3 +71,5 @@ class Symbol:
     rpcs: list[RpcSymbol] = field(default_factory=list)
     # For typedef: the source type
     typedef_source: Optional[str] = None
+    # @ctype override (e.g., 'http_code__t')
+    ctype: Optional[str] = None
