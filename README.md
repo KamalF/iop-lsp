@@ -169,18 +169,31 @@ servers.  To ensure iop-lsp takes priority for go-to-definition on IOP types,
 list it first in `vim.lsp.enable()` or use a custom `gd` keymap that prefers
 iop-lsp.
 
-#### Helix
+### Emacs
 
-List `iop-lsp` before `clangd` in the `language-servers` array for C:
+Emacs ≥ 29 ships with [Eglot](https://www.gnu.org/software/emacs/manual/html_mono/eglot.html),
+a built-in LSP client.  The easiest way to run both `clangd` and
+`iop-lsp` on the same buffer is to use
+[rassumfrassum](https://github.com/joaotavora/rassumfrassum/), an LSP
+multiplexer.
 
-```toml
-[[language]]
-name = "c"
-language-servers = ["iop-lsp", "clangd"]
+Create a rassumfrassum preset (e.g. `~/.config/rass/presets/cmode-iop.py`):
+
+```python
+def servers():
+    return [
+        ['clangd'],
+        ['uv', 'run', '--project', '/path/to/iop-lsp', '-m', 'iop_lsp',
+         '--stdio']
+    ]
 ```
 
-The first server in the array gets priority per-feature, so iop-lsp
-results are preferred when available.
+Then register the preset with Eglot:
+
+```lisp
+(add-to-list 'eglot-server-programs
+             '((c++-mode c-mode) . ("rass" "cmode-iop")))
+```
 
 ### Helix
 
@@ -204,7 +217,19 @@ language-servers = ["iop-lsp"]
 
 Then in Helix:
 - `gd` — Go to definition (on a type reference)
-- `K` — Show hover documentation
+- `<space>k` — Show hover documentation
+
+
+List `iop-lsp` before `clangd` in the `language-servers` array for C:
+
+```toml
+[[language]]
+name = "c"
+language-servers = ["iop-lsp", "clangd"]
+```
+
+The first server in the array gets priority per-feature, so iop-lsp
+results are preferred when available.
 
 ## Testing
 
