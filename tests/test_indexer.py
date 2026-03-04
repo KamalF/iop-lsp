@@ -423,6 +423,154 @@ class TestCIdentifierResolution(unittest.TestCase):
         )
 
 
+class TestDocRef(unittest.TestCase):
+    """Tests for doc_ref parsing and resolution."""
+
+    def test_parse_doc_ref_p_tag(self):
+        from iop_lsp.server import _parse_doc_ref
+        tag, ident = _parse_doc_ref(r'\p GridSquare')
+        self.assertEqual(tag, 'p')
+        self.assertEqual(ident, 'GridSquare')
+
+    def test_parse_doc_ref_ref_tag_qualified(self):
+        from iop_lsp.server import _parse_doc_ref
+        tag, ident = _parse_doc_ref(r'\ref geoutils.GridSquare')
+        self.assertEqual(tag, 'ref')
+        self.assertEqual(ident, 'geoutils.GridSquare')
+
+    def test_parse_doc_ref_see_tag(self):
+        from iop_lsp.server import _parse_doc_ref
+        tag, ident = _parse_doc_ref(r'\see Foo')
+        self.assertEqual(tag, 'see')
+        self.assertEqual(ident, 'Foo')
+
+    def test_parse_doc_ref_struct_tag(self):
+        from iop_lsp.server import _parse_doc_ref
+        tag, ident = _parse_doc_ref(r'\struct Foo')
+        self.assertEqual(tag, 'struct')
+        self.assertEqual(ident, 'Foo')
+
+    def test_parse_doc_ref_enum_tag(self):
+        from iop_lsp.server import _parse_doc_ref
+        tag, ident = _parse_doc_ref(r'\enum Color')
+        self.assertEqual(tag, 'enum')
+        self.assertEqual(ident, 'Color')
+
+    def test_parse_doc_ref_class_tag(self):
+        from iop_lsp.server import _parse_doc_ref
+        tag, ident = _parse_doc_ref(r'\class Base')
+        self.assertEqual(tag, 'class')
+        self.assertEqual(ident, 'Base')
+
+    def test_parse_doc_ref_c_tag(self):
+        from iop_lsp.server import _parse_doc_ref
+        tag, ident = _parse_doc_ref(r'\c MyType')
+        self.assertEqual(tag, 'c')
+        self.assertEqual(ident, 'MyType')
+
+    def test_parse_doc_ref_a_tag(self):
+        from iop_lsp.server import _parse_doc_ref
+        tag, ident = _parse_doc_ref(r'\a param')
+        self.assertEqual(tag, 'a')
+        self.assertEqual(ident, 'param')
+
+    def test_parse_doc_ref_invalid(self):
+        from iop_lsp.server import _parse_doc_ref
+        tag, ident = _parse_doc_ref('not a doc ref')
+        self.assertIsNone(tag)
+        self.assertIsNone(ident)
+
+    def test_resolve_simple_name_via_doc_ref(self):
+        """Test that a simple name from doc_ref resolves in the index."""
+        indexer = Indexer()
+        indexer.index_source(
+            '/test.iop',
+            b'package geoutils;\nstruct GridSquare {};',
+        )
+        sym = indexer.index.resolve('GridSquare', 'geoutils')
+        self.assertIsNotNone(sym)
+        self.assertEqual(sym.name, 'GridSquare')
+
+    def test_resolve_qualified_name_via_doc_ref(self):
+        """Test that a qualified name from doc_ref resolves."""
+        indexer = Indexer()
+        indexer.index_source(
+            '/test.iop',
+            b'package geoutils;\nstruct GridSquare {};',
+        )
+        sym = indexer.index.resolve('geoutils.GridSquare')
+        self.assertIsNotNone(sym)
+        self.assertEqual(sym.qualified_name, 'geoutils.GridSquare')
+
+    def test_tag_kind_filtering_struct_matches(self):
+        """\\struct Foo should match when Foo is a struct."""
+        from iop_lsp.server import _TAG_KIND_MAP
+        indexer = Indexer()
+        indexer.index_source(
+            '/test.iop', b'package foo;\nstruct Bar {};',
+        )
+        sym = indexer.index.resolve('Bar', 'foo')
+        self.assertIsNotNone(sym)
+        required_kind = _TAG_KIND_MAP.get('struct')
+        self.assertEqual(sym.kind, required_kind)
+
+    def test_tag_kind_filtering_struct_rejects_enum(self):
+        """\\struct Foo should NOT match when Foo is an enum."""
+        from iop_lsp.server import _TAG_KIND_MAP
+        indexer = Indexer()
+        indexer.index_source(
+            '/test.iop', b'package foo;\nenum Bar { X, };',
+        )
+        sym = indexer.index.resolve('Bar', 'foo')
+        self.assertIsNotNone(sym)
+        required_kind = _TAG_KIND_MAP.get('struct')
+        self.assertNotEqual(sym.kind, required_kind)
+
+    def test_unknown_identifier_returns_none(self):
+        """Unknown identifier should return None from resolve."""
+        indexer = Indexer()
+        indexer.index_source(
+            '/test.iop', b'package foo;\nstruct Bar {};',
+        )
+        sym = indexer.index.resolve('NonExistent', 'foo')
+        self.assertIsNone(sym)
+
+    def test_node_context_doc_ref(self):
+        """Test that _get_node_context_at_position detects doc_ref."""
+        import tree_sitter as ts
+        import tree_sitter_iop as tsiop
+        from iop_lsp.indexer import IOP_LANGUAGE
+        from iop_lsp.server import _get_node_context_at_position
+
+        parser = ts.Parser(IOP_LANGUAGE)
+        source = (
+            b'package foo;\n'
+            b'/** See \\p GridSquare for details. */\n'
+            b'struct Bar {};'
+        )
+        tree = parser.parse(source)
+
+        # Find the doc_ref node in the tree
+        root = tree.root_node
+        doc_ref_node = None
+        queue = [root]
+        while queue:
+            n = queue.pop(0)
+            if n.type == 'doc_ref':
+                doc_ref_node = n
+                break
+            queue.extend(n.children)
+
+        if doc_ref_node is None:
+            self.skipTest('tree-sitter-iop does not produce doc_ref nodes')
+
+        line = doc_ref_node.start_point[0]
+        col = doc_ref_node.start_point[1]
+        node, context = _get_node_context_at_position(tree, line, col)
+        self.assertEqual(context, 'doc_ref')
+        self.assertIsNotNone(node)
+
+
 class TestDocComments(unittest.TestCase):
     def setUp(self):
         self.indexer = Indexer()

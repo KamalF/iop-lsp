@@ -45,6 +45,27 @@ def _uri_to_path(uri: str) -> str:
 
 _C_WORD_RE = re.compile(r'[a-zA-Z_][a-zA-Z0-9_]*')
 
+_DOC_REF_RE = re.compile(
+    r'\\(p|c|a|ref|see|class|struct|enum|typedef|union)\s+(.*)'
+)
+
+# Tags that constrain the symbol kind
+_TAG_KIND_MAP: dict[str, SymbolKind] = {
+    'struct': SymbolKind.STRUCT,
+    'enum': SymbolKind.ENUM,
+    'class': SymbolKind.CLASS,
+    'union': SymbolKind.UNION,
+    'typedef': SymbolKind.TYPEDEF,
+}
+
+
+def _parse_doc_ref(text: str) -> tuple[Optional[str], Optional[str]]:
+    """Parse doc_ref text into (tag, identifier)."""
+    m = _DOC_REF_RE.match(text)
+    if m:
+        return m.group(1), m.group(2)
+    return None, None
+
 # File extensions treated as C files for IOP identifier resolution
 _C_EXTENSIONS = ('.c', '.h', '.blk')
 
@@ -156,6 +177,10 @@ def _get_node_context_at_position(
     node = _node_at_position(tree, line, col)
     if node is None:
         return None, 'unknown'
+
+    # doc_ref is an atomic token with no children
+    if node.type == 'doc_ref':
+        return node, 'doc_ref'
 
     parent = node.parent
 
@@ -278,6 +303,16 @@ def goto_definition(
                 range=_range_to_lsp(enum_val.range),
             )
 
+    elif context == 'doc_ref':
+        tag, identifier = _parse_doc_ref(text)
+        if identifier:
+            sym = indexer.index.resolve(identifier, current_package)
+            if sym:
+                # If the tag constrains the kind, filter
+                required_kind = _TAG_KIND_MAP.get(tag)
+                if required_kind is None or sym.kind == required_kind:
+                    return _symbol_to_location(sym)
+
     elif context == 'field_name':
         # Go to the type of this field
         if node.parent and node.parent.type == 'variable':
@@ -349,6 +384,20 @@ def hover(params: lsp.HoverParams) -> Optional[lsp.Hover]:
                     value=_format_symbol_hover(sym),
                 ),
             )
+
+    elif context == 'doc_ref':
+        tag, identifier = _parse_doc_ref(text)
+        if identifier:
+            sym = indexer.index.resolve(identifier, current_package)
+            if sym:
+                required_kind = _TAG_KIND_MAP.get(tag)
+                if required_kind is None or sym.kind == required_kind:
+                    return lsp.Hover(
+                        contents=lsp.MarkupContent(
+                            kind=lsp.MarkupKind.Markdown,
+                            value=_format_symbol_hover(sym),
+                        ),
+                    )
 
     elif context == 'enum_value':
         result = indexer.index.resolve_enum_value(text, current_package)
