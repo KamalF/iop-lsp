@@ -866,5 +866,206 @@ class TestWorkspaceSymbols(unittest.TestCase):
         return combined[:100] if combined else None
 
 
+class TestFindReferences(unittest.TestCase):
+    """Tests for Find References functionality."""
+
+    def setUp(self):
+        self.indexer = Indexer()
+        self.parser = __import__(
+            'tree_sitter', fromlist=['Parser']
+        ).Parser(
+            __import__(
+                'iop_lsp.indexer', fromlist=['IOP_LANGUAGE']
+            ).IOP_LANGUAGE
+        )
+
+    def _index_source(self, source: str, filename: str = '/test.iop'):
+        self.indexer.index_source(filename, source.encode('utf-8'))
+
+    def _find_refs(self, source: str, target_names: set,
+                   filename: str = '/test.iop'):
+        from iop_lsp.server import _find_references_in_file
+        return _find_references_in_file(
+            filename, source.encode('utf-8'), target_names,
+        )
+
+    def test_field_type_reference(self):
+        source = (
+            'package foo;\n'
+            'struct Color {};\n'
+            'struct Painted {\n'
+            '    Color color;\n'
+            '};'
+        )
+        refs = self._find_refs(source, {'Color'})
+        self.assertEqual(len(refs), 1)
+        self.assertEqual(refs[0].range.start.line, 3)
+
+    def test_rpc_type_references(self):
+        source = (
+            'package foo;\n'
+            'struct Req {};\n'
+            'struct Resp {};\n'
+            'struct Err {};\n'
+            'interface Svc {\n'
+            '    call\n'
+            '        in Req\n'
+            '        out Resp\n'
+            '        throw Err;\n'
+            '};'
+        )
+        refs = self._find_refs(source, {'Req'})
+        self.assertEqual(len(refs), 1)
+        refs = self._find_refs(source, {'Resp'})
+        self.assertEqual(len(refs), 1)
+        refs = self._find_refs(source, {'Err'})
+        self.assertEqual(len(refs), 1)
+
+    def test_class_inheritance_reference(self):
+        source = (
+            'package foo;\n'
+            'class Base : 1 {};\n'
+            'class Child : 2 : Base {};'
+        )
+        refs = self._find_refs(source, {'Base'})
+        self.assertEqual(len(refs), 1)
+        # Should be on line 2 (Child : Base)
+        self.assertEqual(refs[0].range.start.line, 2)
+
+    def test_typedef_source_reference(self):
+        source = (
+            'package foo;\n'
+            'struct MyStruct {};\n'
+            'typedef MyStruct MyAlias;'
+        )
+        refs = self._find_refs(source, {'MyStruct'})
+        self.assertEqual(len(refs), 1)
+        self.assertEqual(refs[0].range.start.line, 2)
+
+    def test_cross_file_references(self):
+        self._index_source(
+            'package foo;\nstruct SharedType {};',
+            '/a.iop',
+        )
+        self._index_source(
+            'package bar;\nstruct User {\n    SharedType ref;\n};',
+            '/b.iop',
+        )
+        sym = self.indexer.index.by_qualified_name['foo.SharedType']
+
+        # Find refs in file b
+        refs = self._find_refs(
+            'package bar;\nstruct User {\n    SharedType ref;\n};',
+            {'SharedType', 'foo.SharedType'},
+            '/b.iop',
+        )
+        self.assertEqual(len(refs), 1)
+
+    def test_module_field_type_reference(self):
+        source = (
+            'package foo;\n'
+            'interface Log {};\n'
+            'module MyMod {\n'
+            '    Log logger;\n'
+            '};'
+        )
+        refs = self._find_refs(source, {'Log'})
+        # Should find the type ref (Log) but not the field name (logger)
+        self.assertEqual(len(refs), 1)
+        self.assertEqual(refs[0].range.start.line, 3)
+
+    def test_module_field_name_not_matched(self):
+        """Field name in module_field should not be reported as reference."""
+        source = (
+            'package foo;\n'
+            'interface Log {};\n'
+            'module MyMod {\n'
+            '    Log Log;\n'  # type and name both 'Log'
+            '};'
+        )
+        refs = self._find_refs(source, {'Log'})
+        # Should find only the type (first identifier), not the name
+        self.assertEqual(len(refs), 1)
+
+    def test_include_declaration_true(self):
+        self._index_source(
+            'package foo;\n'
+            'struct Target {};\n'
+            'struct User {\n    Target t;\n};',
+        )
+        sym = self.indexer.index.by_qualified_name['foo.Target']
+        from iop_lsp.server import _find_references_in_file
+        # Manually build what _find_all_references would do
+        target_names = {sym.name, sym.qualified_name}
+        from iop_lsp.server import _symbol_to_location
+        locations = [_symbol_to_location(sym)]
+        source = (
+            'package foo;\n'
+            'struct Target {};\n'
+            'struct User {\n    Target t;\n};'
+        )
+        locations.extend(
+            _find_references_in_file(
+                '/test.iop', source.encode('utf-8'), target_names,
+            )
+        )
+        # Declaration + 1 usage
+        self.assertEqual(len(locations), 2)
+
+    def test_include_declaration_false(self):
+        self._index_source(
+            'package foo;\n'
+            'struct Target {};\n'
+            'struct User {\n    Target t;\n};',
+        )
+        sym = self.indexer.index.by_qualified_name['foo.Target']
+        from iop_lsp.server import _find_references_in_file
+        target_names = {sym.name, sym.qualified_name}
+        source = (
+            'package foo;\n'
+            'struct Target {};\n'
+            'struct User {\n    Target t;\n};'
+        )
+        locations = _find_references_in_file(
+            '/test.iop', source.encode('utf-8'), target_names,
+        )
+        # Only usage, no declaration
+        self.assertEqual(len(locations), 1)
+
+    def test_no_matches_returns_empty(self):
+        source = (
+            'package foo;\n'
+            'struct A {\n'
+            '    int x;\n'
+            '};'
+        )
+        refs = self._find_refs(source, {'NonExistent'})
+        self.assertEqual(len(refs), 0)
+
+    def test_qualified_name_reference(self):
+        source = (
+            'package foo;\n'
+            'struct User {\n'
+            '    pkg.TypeName field;\n'
+            '};'
+        )
+        refs = self._find_refs(source, {'pkg.TypeName'})
+        self.assertEqual(len(refs), 1)
+
+    def test_multiple_references_in_same_file(self):
+        source = (
+            'package foo;\n'
+            'struct Color {};\n'
+            'struct A {\n'
+            '    Color x;\n'
+            '};\n'
+            'struct B {\n'
+            '    Color y;\n'
+            '};'
+        )
+        refs = self._find_refs(source, {'Color'})
+        self.assertEqual(len(refs), 2)
+
+
 if __name__ == '__main__':
     unittest.main()

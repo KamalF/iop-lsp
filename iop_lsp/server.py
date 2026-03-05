@@ -14,13 +14,25 @@ from lsprotocol import types as lsp
 from pygls.lsp.server import LanguageServer
 
 from .indexer import BUILTIN_TYPES, IOP_LANGUAGE, Indexer, _find_child
-from .symbols import EnumValueSymbol, Symbol, SymbolKind
+from .symbols import (
+    EnumValueSymbol, FieldSymbol, RpcSymbol, Symbol, SymbolKind,
+)
 
 log = logging.getLogger(__name__)
 
 server = LanguageServer('iop-lsp', 'v0.1.0')
 indexer = Indexer()
 _parser = ts.Parser(IOP_LANGUAGE)
+
+# Pre-compiled tree-sitter query for finding type references across files
+_REFERENCE_QUERY = ts.Query(IOP_LANGUAGE, """
+(variable (type (identifier) @ref))
+(class_inheritance (identifier) @ref)
+(rpc_in (identifier) @ref)
+(rpc_out (identifier) @ref)
+(rpc_throw (identifier) @ref)
+(module_field (identifier) @ref)
+""")
 
 
 def _get_tree(uri: str) -> Optional[ts.Tree]:
@@ -247,6 +259,144 @@ def did_change(params: lsp.DidChangeTextDocumentParams) -> None:
     path = _uri_to_path(params.text_document.uri)
     source = doc.source.encode('utf-8')
     indexer.index_source(path, source)
+
+
+def _find_references_in_file(
+    filepath: str,
+    source: bytes,
+    target_names: set[str],
+) -> list[lsp.Location]:
+    """Find all references to target_names in a single file's source."""
+    tree = _parser.parse(source)
+    root = tree.root_node
+    locations: list[lsp.Location] = []
+    cursor = ts.QueryCursor(_REFERENCE_QUERY)
+
+    for pattern_idx, match in cursor.matches(root):
+        for capture_name, nodes in match.items():
+            for node in nodes:
+                text = node.text.decode('utf-8') if node.text else None
+                if text is None or text not in target_names:
+                    continue
+                # For module_field (pattern index 5), skip the field name
+                # (second identifier) — only the first is the type reference
+                if pattern_idx == 5 and node.parent:
+                    ids = [
+                        c for c in node.parent.children
+                        if c.type == 'identifier'
+                    ]
+                    if len(ids) >= 2 and node.id == ids[1].id:
+                        continue
+                sp = node.start_point
+                ep = node.end_point
+                locations.append(lsp.Location(
+                    uri=f'file://{filepath}',
+                    range=lsp.Range(
+                        start=lsp.Position(line=sp.row, character=sp.column),
+                        end=lsp.Position(line=ep.row, character=ep.column),
+                    ),
+                ))
+    return locations
+
+
+def _find_all_references(
+    sym: Symbol,
+    include_declaration: bool,
+) -> list[lsp.Location]:
+    """Find all references to a symbol across all indexed files."""
+    target_names = {sym.name, sym.qualified_name}
+    locations: list[lsp.Location] = []
+
+    if include_declaration:
+        locations.append(_symbol_to_location(sym))
+
+    for filepath in indexer.index.by_file:
+        # Try to get source from open documents first
+        uri = f'file://{filepath}'
+        try:
+            doc = server.workspace.get_text_document(uri)
+            source = doc.source.encode('utf-8')
+        except Exception:
+            try:
+                with open(filepath, 'rb') as f:
+                    source = f.read()
+            except OSError:
+                continue
+        locations.extend(
+            _find_references_in_file(filepath, source, target_names)
+        )
+    return locations
+
+
+@server.feature(lsp.TEXT_DOCUMENT_REFERENCES)
+def find_references(
+    params: lsp.ReferenceParams,
+) -> Optional[list[lsp.Location]]:
+    uri = params.text_document.uri
+    line = params.position.line
+    col = params.position.character
+
+    tree = _get_tree(uri)
+    if tree is None:
+        return None
+
+    node, context = _get_node_context_at_position(tree, line, col)
+    if node is None:
+        return None
+
+    text = node.text.decode('utf-8') if node.text else None
+    if text is None:
+        return None
+
+    # For type nodes, get the identifier text
+    if node.type == 'type':
+        for child in node.children:
+            if child.type == 'identifier':
+                text = child.text.decode('utf-8')
+                break
+
+    current_package = _get_package_for_uri(uri)
+    sym: Optional[Symbol] = None
+
+    if context == 'type_def':
+        # On a type definition — find who references this type
+        qname = f'{current_package}.{text}' if current_package else text
+        sym = indexer.index.by_qualified_name.get(qname)
+
+    elif context in ('type_ref', 'field_name'):
+        sym = indexer.index.resolve(text, current_package)
+
+    elif context == 'enum_value_def' or context == 'enum_value':
+        # Resolve to parent enum symbol
+        result = indexer.index.resolve_enum_value(text, current_package)
+        if result:
+            sym = result[0]
+
+    elif context == 'rpc_name':
+        # Resolve to parent interface symbol
+        if node.parent and node.parent.type == 'rpc':
+            # Walk up to interface_definition
+            iface_node = node.parent.parent  # rpc_block
+            if iface_node:
+                iface_node = iface_node.parent  # interface_definition
+            if iface_node:
+                iface_id = None
+                for child in iface_node.children:
+                    if child.type == 'identifier':
+                        iface_id = child
+                        break
+                if iface_id:
+                    iface_name = iface_id.text.decode('utf-8')
+                    sym = indexer.index.resolve(
+                        iface_name, current_package,
+                    )
+
+    if sym is None:
+        return None
+
+    include_declaration = params.context.include_declaration
+    locations = _find_all_references(sym, include_declaration)
+    return locations or None
 
 
 @server.feature(lsp.TEXT_DOCUMENT_DEFINITION)
