@@ -36,6 +36,7 @@ class FieldSymbol:
     default_value: Optional[str]
     range: Range
     doc: Optional[str]
+    full_range: Optional[Range] = None  # Range of the entire field node
 
 
 @dataclass
@@ -46,6 +47,7 @@ class RpcSymbol:
     throw_type: Optional[str]
     range: Range
     doc: Optional[str]
+    full_range: Optional[Range] = None  # Range of the entire rpc node
 
 
 @dataclass
@@ -54,6 +56,7 @@ class EnumValueSymbol:
     value: Optional[str]
     range: Range
     doc: Optional[str]
+    full_range: Optional[Range] = None  # Range of the entire enum_field node
 
 
 @dataclass
@@ -66,6 +69,7 @@ class Symbol:
     doc: Optional[str]
     package: str
     parent_class: Optional[str]  # For classes, the parent class name
+    full_range: Optional[Range] = None  # Range of the entire definition node
     fields: list[FieldSymbol] = field(default_factory=list)
     enum_values: list[EnumValueSymbol] = field(default_factory=list)
     rpcs: list[RpcSymbol] = field(default_factory=list)

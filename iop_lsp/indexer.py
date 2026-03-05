@@ -345,6 +345,7 @@ class Indexer:
             doc=doc,
             package=package,
             parent_class=parent_class,
+            full_range=_node_range(node),
             ctype=ctype,
         )
 
@@ -426,6 +427,7 @@ class Indexer:
                         child
                     ),
                     doc=get_field_doc_comment(child),
+                    full_range=_node_range(child),
                 ))
         return fields
 
@@ -453,6 +455,7 @@ class Indexer:
                         child
                     ),
                     doc=doc,
+                    full_range=_node_range(child),
                 ))
         return values
 
@@ -476,6 +479,7 @@ class Indexer:
                         child
                     ),
                     doc=doc,
+                    full_range=_node_range(child),
                 ))
         return rpcs
 
@@ -514,5 +518,6 @@ class Indexer:
                         default_value=None,
                         range=_node_range(name_id),
                         doc=get_field_doc_comment(child),
+                        full_range=_node_range(child),
                     ))
         return fields

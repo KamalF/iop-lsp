@@ -452,6 +452,71 @@ def hover(params: lsp.HoverParams) -> Optional[lsp.Hover]:
     return None
 
 
+# Map IOP SymbolKind to LSP SymbolKind
+_IOP_TO_LSP_KIND: dict[SymbolKind, lsp.SymbolKind] = {
+    SymbolKind.STRUCT: lsp.SymbolKind.Struct,
+    SymbolKind.UNION: lsp.SymbolKind.Struct,
+    SymbolKind.CLASS: lsp.SymbolKind.Class,
+    SymbolKind.ENUM: lsp.SymbolKind.Enum,
+    SymbolKind.INTERFACE: lsp.SymbolKind.Interface,
+    SymbolKind.MODULE: lsp.SymbolKind.Module,
+    SymbolKind.TYPEDEF: lsp.SymbolKind.TypeParameter,
+    SymbolKind.SNMP_OBJ: lsp.SymbolKind.Object,
+    SymbolKind.SNMP_TBL: lsp.SymbolKind.Object,
+    SymbolKind.SNMP_IFACE: lsp.SymbolKind.Interface,
+}
+
+
+def _symbol_to_document_symbol(sym: Symbol) -> lsp.DocumentSymbol:
+    """Convert an IOP Symbol to an LSP DocumentSymbol with children."""
+    children: list[lsp.DocumentSymbol] = []
+
+    for f in sym.fields:
+        children.append(lsp.DocumentSymbol(
+            name=f.name,
+            kind=lsp.SymbolKind.Field,
+            range=_range_to_lsp(f.full_range or f.range),
+            selection_range=_range_to_lsp(f.range),
+        ))
+
+    for ev in sym.enum_values:
+        children.append(lsp.DocumentSymbol(
+            name=ev.name,
+            kind=lsp.SymbolKind.EnumMember,
+            range=_range_to_lsp(ev.full_range or ev.range),
+            selection_range=_range_to_lsp(ev.range),
+        ))
+
+    for rpc in sym.rpcs:
+        children.append(lsp.DocumentSymbol(
+            name=rpc.name,
+            kind=lsp.SymbolKind.Method,
+            range=_range_to_lsp(rpc.full_range or rpc.range),
+            selection_range=_range_to_lsp(rpc.range),
+        ))
+
+    lsp_kind = _IOP_TO_LSP_KIND.get(sym.kind, lsp.SymbolKind.Object)
+
+    return lsp.DocumentSymbol(
+        name=sym.name,
+        kind=lsp_kind,
+        range=_range_to_lsp(sym.full_range or sym.range),
+        selection_range=_range_to_lsp(sym.range),
+        children=children or None,
+    )
+
+
+@server.feature(lsp.TEXT_DOCUMENT_DOCUMENT_SYMBOL)
+def document_symbol(
+    params: lsp.DocumentSymbolParams,
+) -> Optional[list[lsp.DocumentSymbol]]:
+    path = _uri_to_path(params.text_document.uri)
+    symbols = indexer.index.by_file.get(path, [])
+    if not symbols:
+        return None
+    return [_symbol_to_document_symbol(s) for s in symbols]
+
+
 def _format_symbol_hover(sym: Symbol) -> str:
     """Format a symbol for hover display."""
     kind_str = sym.kind.value

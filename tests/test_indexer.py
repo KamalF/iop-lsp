@@ -620,5 +620,137 @@ class TestDocComments(unittest.TestCase):
         self.assertIsNone(sym.doc)
 
 
+class TestDocumentSymbols(unittest.TestCase):
+    """Tests for document symbol generation."""
+
+    def setUp(self):
+        self.indexer = Indexer()
+
+    def _index_source(self, source: str, filename: str = '/test.iop'):
+        self.indexer.index_source(filename, source.encode('utf-8'))
+
+    def test_full_range_populated_on_symbol(self):
+        self._index_source(
+            'package foo;\n'
+            'struct Bar {\n'
+            '    int x;\n'
+            '};'
+        )
+        sym = self.indexer.index.by_qualified_name['foo.Bar']
+        self.assertIsNotNone(sym.full_range)
+        # full_range should span the entire struct definition
+        self.assertGreater(
+            sym.full_range.end_line - sym.full_range.start_line,
+            0,
+        )
+        # range (identifier) should be within full_range
+        self.assertGreaterEqual(
+            sym.range.start_line, sym.full_range.start_line,
+        )
+
+    def test_full_range_populated_on_field(self):
+        self._index_source(
+            'package foo;\n'
+            'struct Bar {\n'
+            '    int x;\n'
+            '};'
+        )
+        sym = self.indexer.index.by_qualified_name['foo.Bar']
+        field = sym.fields[0]
+        self.assertIsNotNone(field.full_range)
+
+    def test_full_range_populated_on_enum_value(self):
+        self._index_source(
+            'package foo;\n'
+            'enum Color {\n'
+            '    RED = 0,\n'
+            '};'
+        )
+        sym = self.indexer.index.by_qualified_name['foo.Color']
+        ev = sym.enum_values[0]
+        self.assertIsNotNone(ev.full_range)
+
+    def test_full_range_populated_on_rpc(self):
+        self._index_source(
+            'package foo;\n'
+            'interface Svc {\n'
+            '    doStuff\n'
+            '        in void\n'
+            '        out void;\n'
+            '};'
+        )
+        sym = self.indexer.index.by_qualified_name['foo.Svc']
+        rpc = sym.rpcs[0]
+        self.assertIsNotNone(rpc.full_range)
+
+    def test_document_symbol_conversion(self):
+        """Test _symbol_to_document_symbol produces correct hierarchy."""
+        from iop_lsp.server import _symbol_to_document_symbol
+        self._index_source(
+            'package foo;\n'
+            'struct MyStruct {\n'
+            '    int x;\n'
+            '    string name;\n'
+            '};'
+        )
+        sym = self.indexer.index.by_qualified_name['foo.MyStruct']
+        doc_sym = _symbol_to_document_symbol(sym)
+        self.assertEqual(doc_sym.name, 'MyStruct')
+        from lsprotocol import types as lsp
+        self.assertEqual(doc_sym.kind, lsp.SymbolKind.Struct)
+        self.assertIsNotNone(doc_sym.children)
+        self.assertEqual(len(doc_sym.children), 2)
+        self.assertEqual(doc_sym.children[0].name, 'x')
+        self.assertEqual(doc_sym.children[0].kind, lsp.SymbolKind.Field)
+        self.assertEqual(doc_sym.children[1].name, 'name')
+
+    def test_document_symbol_enum_children(self):
+        from iop_lsp.server import _symbol_to_document_symbol
+        from lsprotocol import types as lsp
+        self._index_source(
+            'package foo;\n'
+            'enum Color {\n'
+            '    RED = 0,\n'
+            '    GREEN = 1,\n'
+            '};'
+        )
+        sym = self.indexer.index.by_qualified_name['foo.Color']
+        doc_sym = _symbol_to_document_symbol(sym)
+        self.assertEqual(doc_sym.kind, lsp.SymbolKind.Enum)
+        self.assertEqual(len(doc_sym.children), 2)
+        self.assertEqual(
+            doc_sym.children[0].kind, lsp.SymbolKind.EnumMember,
+        )
+
+    def test_document_symbol_interface_children(self):
+        from iop_lsp.server import _symbol_to_document_symbol
+        from lsprotocol import types as lsp
+        self._index_source(
+            'package foo;\n'
+            'interface Svc {\n'
+            '    doStuff\n'
+            '        in void\n'
+            '        out void;\n'
+            '};'
+        )
+        sym = self.indexer.index.by_qualified_name['foo.Svc']
+        doc_sym = _symbol_to_document_symbol(sym)
+        self.assertEqual(doc_sym.kind, lsp.SymbolKind.Interface)
+        self.assertEqual(len(doc_sym.children), 1)
+        self.assertEqual(
+            doc_sym.children[0].kind, lsp.SymbolKind.Method,
+        )
+
+    def test_document_symbol_no_children(self):
+        from iop_lsp.server import _symbol_to_document_symbol
+        self._index_source(
+            'package foo;\n'
+            'typedef int[] IntArray;'
+        )
+        sym = self.indexer.index.by_qualified_name['foo.IntArray']
+        doc_sym = _symbol_to_document_symbol(sym)
+        self.assertIsNone(doc_sym.children)
+
+
 if __name__ == '__main__':
     unittest.main()
