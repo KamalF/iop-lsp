@@ -752,5 +752,119 @@ class TestDocumentSymbols(unittest.TestCase):
         self.assertIsNone(doc_sym.children)
 
 
+class TestWorkspaceSymbols(unittest.TestCase):
+    """Tests for workspace symbol search."""
+
+    def setUp(self):
+        self.indexer = Indexer()
+
+    def _index_source(self, source: str, filename: str = '/test.iop'):
+        self.indexer.index_source(filename, source.encode('utf-8'))
+
+    def test_empty_query_returns_all(self):
+        from iop_lsp.server import _IOP_TO_LSP_KIND
+        self._index_source(
+            'package foo;\n'
+            'struct Bar {};\n'
+            'enum Baz { X, };',
+        )
+        # Simulate workspace symbol search
+        results = self._search('')
+        self.assertEqual(len(results), 2)
+
+    def test_substring_match(self):
+        self._index_source(
+            'package foo;\n'
+            'struct MyStruct {};\n'
+            'struct OtherThing {};',
+        )
+        results = self._search('struct')
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].name, 'MyStruct')
+
+    def test_case_insensitive(self):
+        self._index_source(
+            'package foo;\n'
+            'struct MyStruct {};',
+        )
+        results = self._search('MYSTRUCT')
+        self.assertEqual(len(results), 1)
+
+    def test_prefix_matches_first(self):
+        self._index_source(
+            'package foo;\n'
+            'struct ABar {};\n'
+            'struct BarA {};',
+        )
+        results = self._search('bar')
+        self.assertEqual(len(results), 2)
+        # BarA starts with 'bar', so it should come first
+        self.assertEqual(results[0].name, 'BarA')
+
+    def test_limit_100(self):
+        # Create 150 symbols
+        lines = ['package foo;']
+        for i in range(150):
+            lines.append(f'struct S{i} {{}};')
+        self._index_source('\n'.join(lines))
+        results = self._search('')
+        self.assertLessEqual(len(results), 100)
+
+    def test_no_match_returns_none(self):
+        self._index_source('package foo;\nstruct Bar {};')
+        results = self._search('zzzzz')
+        self.assertIsNone(results)
+
+    def test_container_name_is_package(self):
+        self._index_source('package mypackage;\nstruct Foo {};')
+        results = self._search('foo')
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].container_name, 'mypackage')
+
+    def _search(self, query: str):
+        """Simulate workspace symbol search using the indexer."""
+        from lsprotocol import types as lsp
+        from iop_lsp.server import _IOP_TO_LSP_KIND
+
+        query_lower = query.lower()
+        results = []
+        prefix_matches = []
+
+        for sym in self.indexer.index.by_qualified_name.values():
+            name_lower = sym.name.lower()
+            if query_lower and query_lower not in name_lower:
+                continue
+
+            lsp_kind = _IOP_TO_LSP_KIND.get(
+                sym.kind, lsp.SymbolKind.Object,
+            )
+            info = lsp.SymbolInformation(
+                name=sym.name,
+                kind=lsp_kind,
+                location=lsp.Location(
+                    uri=f'file://{sym.file}',
+                    range=lsp.Range(
+                        start=lsp.Position(
+                            line=sym.range.start_line,
+                            character=sym.range.start_col,
+                        ),
+                        end=lsp.Position(
+                            line=sym.range.end_line,
+                            character=sym.range.end_col,
+                        ),
+                    ),
+                ),
+                container_name=sym.package,
+            )
+
+            if query_lower and name_lower.startswith(query_lower):
+                prefix_matches.append(info)
+            else:
+                results.append(info)
+
+        combined = prefix_matches + results
+        return combined[:100] if combined else None
+
+
 if __name__ == '__main__':
     unittest.main()

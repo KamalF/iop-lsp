@@ -517,6 +517,40 @@ def document_symbol(
     return [_symbol_to_document_symbol(s) for s in symbols]
 
 
+@server.feature(lsp.WORKSPACE_SYMBOL)
+def workspace_symbol(
+    params: lsp.WorkspaceSymbolParams,
+) -> Optional[list[lsp.SymbolInformation]]:
+    query = params.query.lower()
+    results: list[lsp.SymbolInformation] = []
+    prefix_matches: list[lsp.SymbolInformation] = []
+
+    for sym in indexer.index.by_qualified_name.values():
+        name_lower = sym.name.lower()
+        if query and query not in name_lower:
+            continue
+
+        lsp_kind = _IOP_TO_LSP_KIND.get(sym.kind, lsp.SymbolKind.Object)
+        info = lsp.SymbolInformation(
+            name=sym.name,
+            kind=lsp_kind,
+            location=lsp.Location(
+                uri=f'file://{sym.file}',
+                range=_range_to_lsp(sym.range),
+            ),
+            container_name=sym.package,
+        )
+
+        if query and name_lower.startswith(query):
+            prefix_matches.append(info)
+        else:
+            results.append(info)
+
+    # Prefix matches first, then substring matches
+    combined = prefix_matches + results
+    return combined[:100] if combined else None
+
+
 def _format_symbol_hover(sym: Symbol) -> str:
     """Format a symbol for hover display."""
     kind_str = sym.kind.value
