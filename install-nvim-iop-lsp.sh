@@ -86,18 +86,26 @@ TS_REL=$(realpath --relative-to="$REPO_DIR" "$TS_DIR")
 sed -i "s|^tree-sitter-iop = { path = \".*\" }$|tree-sitter-iop = { path = \"${TS_REL}\" }|" "$REPO_DIR/pyproject.toml"
 info "Updated pyproject.toml: tree-sitter-iop path = \"$TS_REL\""
 
-# ─── 2. Install dependencies ────────────────────────────────────────
+# ─── 2. Clean stale artefacts ──────────────────────────────────────
+
+echo ""
+echo -e "Cleaning stale artefacts..."
+find "$REPO_DIR" -path "$REPO_DIR/.venv" -prune -o -type d -name '__pycache__' -print0 | xargs -0 rm -rf
+rm -rf "$REPO_DIR/build" "$REPO_DIR/dist" "$REPO_DIR"/*.egg-info "$REPO_DIR"/src/*.egg-info
+info "Stale artefacts removed."
+
+# ─── 3. Install dependencies ──────────────────────────────────────
 
 echo ""
 echo -e "Running ${BOLD}uv sync${RESET} ..."
-if (cd "$REPO_DIR" && uv sync 2>&1 | tail -5); then
+if (cd "$REPO_DIR" && uv sync --reinstall-package iop-lsp --reinstall-package tree-sitter-iop 2>&1 | tail -5); then
     info "Python dependencies installed."
 else
     error "uv sync failed — check the output above."
     exit 1
 fi
 
-# ─── 3. Vimrc config block ──────────────────────────────────────────
+# ─── 4. Vimrc config block ──────────────────────────────────────────
 
 if grep -qF "$MARKER_BEGIN" "$VIMRC" 2>/dev/null; then
     sed -i "\|${MARKER_BEGIN}|,\|${MARKER_END}|d" "$VIMRC"
@@ -131,7 +139,7 @@ $MARKER_END
 VIMRC_EOF
 info "Config block added to $VIMRC"
 
-# ─── 4. Smoke test ──────────────────────────────────────────────────
+# ─── 5. Smoke test ──────────────────────────────────────────────────
 
 echo ""
 echo -e "Running smoke test..."
