@@ -13,6 +13,7 @@ import tree_sitter_iop as tsiop
 from lsprotocol import types as lsp
 from pygls.lsp.server import LanguageServer
 
+from .c_mapping import camelcase_to_c
 from .indexer import BUILTIN_TYPES, IOP_LANGUAGE, Indexer, _find_child
 from .symbols import (
     EnumValueSymbol, FieldSymbol, RpcSymbol, Symbol, SymbolKind,
@@ -57,6 +58,33 @@ def _uri_to_path(uri: str) -> str:
 
 _C_WORD_RE = re.compile(r'[a-zA-Z_][a-zA-Z0-9_]*')
 
+# Known IOP attributes for completion
+_IOP_ATTRIBUTES = [
+    'strict', 'nonEmpty', 'nonZero', 'min', 'max',
+    'minLength', 'maxLength', 'length', 'pattern',
+    'ctype', 'prefix', 'allow', 'disallow',
+    'private', 'deprecated', 'cdata', 'noReorder',
+    'alias', 'minOccurs', 'maxOccurs', 'forceFieldName',
+]
+
+# Known doc comment tags for completion
+_DOC_TAGS = [
+    'ref', 'p', 'c', 'a', 'see',
+    'class', 'struct', 'enum', 'typedef', 'union',
+    'brief', 'param', 'return', 'returns',
+    'note', 'warning', 'deprecated',
+]
+
+# Patterns for completion context detection
+_ATTR_RE = re.compile(r'@(\w*)$')
+_DOC_TAG_RE = re.compile(r'\\(\w*)$')
+_DOC_REF_PARTIAL_RE = re.compile(
+    r'\\(?:p|c|a|ref|see|class|struct|enum|typedef|union)\s+(\w[\w.]*)$'
+)
+_QUALIFIED_TYPE_RE = re.compile(r'(\w+)\.(\w*)$')
+_ENUM_VALUE_RE = re.compile(r'=\s*(\w*)$')
+_FIELD_TYPE_RE = re.compile(r'^\s*(\w*)$')
+
 _DOC_REF_RE = re.compile(
     r'\\(p|c|a|ref|see|class|struct|enum|typedef|union)\s+(.*)'
 )
@@ -86,6 +114,96 @@ def _is_c_file(uri: str) -> bool:
     """Check if a URI refers to a C/header/blk file."""
     path = _uri_to_path(uri).lower()
     return any(path.endswith(ext) for ext in _C_EXTENSIONS)
+
+
+def _is_inside_doc_comment(text: str, line: int) -> bool:
+    """Check if the cursor line is inside a /** */ doc comment."""
+    lines = text.split('\n')
+    in_doc = False
+    for i, ln in enumerate(lines):
+        if i > line:
+            break
+        if '/**' in ln:
+            in_doc = True
+        if '*/' in ln:
+            # If */ is on the cursor line, check column-wise later;
+            # for simplicity, if the line has both /** and */, treat
+            # it as inside if /** comes first
+            if i < line:
+                in_doc = False
+    return in_doc
+
+
+def _is_inside_block(text: str, line: int, col: int) -> bool:
+    """Check if cursor position is inside a {} block by counting braces."""
+    lines = text.split('\n')
+    depth = 0
+    for i, ln in enumerate(lines):
+        end = col if i == line else len(ln)
+        for ch in ln[:end]:
+            if ch == '{':
+                depth += 1
+            elif ch == '}':
+                depth -= 1
+        if i == line:
+            break
+    return depth > 0
+
+
+def _get_completion_context(
+    doc_text: str, line: int, col: int,
+) -> tuple[str, str, Optional[str]]:
+    """Determine the completion context at cursor position.
+
+    Returns (context_kind, partial_text, package_prefix) where:
+    - context_kind: 'attribute', 'doc_tag', 'doc_ref', 'qualified_type',
+                    'enum_value', 'field_type', or 'none'
+    - partial_text: what the user has typed so far
+    - package_prefix: package name when context is 'qualified_type'
+    """
+    lines = doc_text.split('\n')
+    if line < 0 or line >= len(lines):
+        return ('none', '', None)
+
+    before_cursor = lines[line][:col]
+
+    # 1. Attribute: @partial
+    m = _ATTR_RE.search(before_cursor)
+    if m:
+        return ('attribute', m.group(1), None)
+
+    in_doc = _is_inside_doc_comment(doc_text, line)
+
+    if in_doc:
+        # 2. Doc ref: \ref Partial, \see Partial, etc.
+        m = _DOC_REF_PARTIAL_RE.search(before_cursor)
+        if m:
+            return ('doc_ref', m.group(1), None)
+
+        # 3. Doc tag: \partial
+        m = _DOC_TAG_RE.search(before_cursor)
+        if m:
+            return ('doc_tag', m.group(1), None)
+
+    in_block = _is_inside_block(doc_text, line, col)
+
+    if in_block:
+        # 4. Qualified type: pkg.Partial
+        m = _QUALIFIED_TYPE_RE.search(before_cursor)
+        if m:
+            return ('qualified_type', m.group(2), m.group(1))
+
+        # 5. Enum value: = PARTIAL
+        m = _ENUM_VALUE_RE.search(before_cursor)
+        if m:
+            return ('enum_value', m.group(1), None)
+
+        # 6. Field type: identifier at start of line inside block
+        m = _FIELD_TYPE_RE.match(before_cursor)
+        if m is not None:
+            return ('field_type', m.group(1), None)
+
+    return ('none', '', None)
 
 
 def _get_word_at_position(
@@ -699,6 +817,270 @@ def workspace_symbol(
     # Prefix matches first, then substring matches
     combined = prefix_matches + results
     return combined[:100] if combined else None
+
+
+# Map IOP SymbolKind to LSP CompletionItemKind
+_IOP_TO_COMPLETION_KIND: dict[SymbolKind, lsp.CompletionItemKind] = {
+    SymbolKind.STRUCT: lsp.CompletionItemKind.Struct,
+    SymbolKind.UNION: lsp.CompletionItemKind.Struct,
+    SymbolKind.CLASS: lsp.CompletionItemKind.Class,
+    SymbolKind.ENUM: lsp.CompletionItemKind.Enum,
+    SymbolKind.INTERFACE: lsp.CompletionItemKind.Interface,
+    SymbolKind.MODULE: lsp.CompletionItemKind.Module,
+    SymbolKind.TYPEDEF: lsp.CompletionItemKind.TypeParameter,
+    SymbolKind.SNMP_OBJ: lsp.CompletionItemKind.Struct,
+    SymbolKind.SNMP_TBL: lsp.CompletionItemKind.Struct,
+    SymbolKind.SNMP_IFACE: lsp.CompletionItemKind.Interface,
+}
+
+
+def _complete_field_type(
+    partial: str, current_package: Optional[str],
+) -> list[lsp.CompletionItem]:
+    """Complete a type name in field position."""
+    items: list[lsp.CompletionItem] = []
+    partial_lower = partial.lower()
+
+    # Builtins
+    for bt in sorted(BUILTIN_TYPES):
+        if bt.startswith(partial_lower):
+            items.append(lsp.CompletionItem(
+                label=bt,
+                kind=lsp.CompletionItemKind.Keyword,
+                sort_text=f'1:{bt}',
+            ))
+
+    seen = set()
+    # Same-package types first
+    if current_package:
+        for sym in indexer.index.by_package.get(current_package, []):
+            if sym.name.lower().startswith(partial_lower):
+                items.append(lsp.CompletionItem(
+                    label=sym.name,
+                    kind=_IOP_TO_COMPLETION_KIND.get(
+                        sym.kind, lsp.CompletionItemKind.Struct,
+                    ),
+                    detail=sym.package,
+                    documentation=sym.doc,
+                    sort_text=f'0:{sym.name}',
+                ))
+                seen.add(sym.qualified_name)
+
+    # Cross-package types
+    for qname, sym in indexer.index.by_qualified_name.items():
+        if qname in seen:
+            continue
+        if sym.name.lower().startswith(partial_lower):
+            items.append(lsp.CompletionItem(
+                label=sym.name,
+                kind=_IOP_TO_COMPLETION_KIND.get(
+                    sym.kind, lsp.CompletionItemKind.Struct,
+                ),
+                detail=sym.package,
+                documentation=sym.doc,
+                insert_text=sym.qualified_name,
+                sort_text=f'2:{sym.name}',
+            ))
+
+    return items
+
+
+def _complete_qualified_type(
+    package_prefix: str, partial: str,
+) -> list[lsp.CompletionItem]:
+    """Complete a type name after 'pkg.' prefix."""
+    items: list[lsp.CompletionItem] = []
+    partial_lower = partial.lower()
+
+    for sym in indexer.index.by_package.get(package_prefix, []):
+        if sym.name.lower().startswith(partial_lower):
+            items.append(lsp.CompletionItem(
+                label=sym.name,
+                kind=_IOP_TO_COMPLETION_KIND.get(
+                    sym.kind, lsp.CompletionItemKind.Struct,
+                ),
+                detail=sym.package,
+                documentation=sym.doc,
+                sort_text=f'0:{sym.name}',
+            ))
+
+    return items
+
+
+def _enum_value_c_name(sym: Symbol, ev: EnumValueSymbol) -> str:
+    """Build the C-style enum value name used in IOP default values.
+
+    Convention: UPPER_SNAKE(enum_name)_VALUE_NAME
+    With @prefix override: PREFIX_VALUE_NAME
+    Examples:
+        LogLevel + INFO -> LOG_LEVEL_INFO
+        MyEnumA(@prefix(A)) + B -> A_B
+    """
+    if sym.enum_prefix:
+        prefix = sym.enum_prefix
+    else:
+        prefix = camelcase_to_c(sym.name).upper()
+    return f'{prefix}_{ev.name}'
+
+
+def _complete_enum_value(
+    partial: str, current_package: Optional[str],
+) -> list[lsp.CompletionItem]:
+    """Complete an enum value in default value position."""
+    items: list[lsp.CompletionItem] = []
+    partial_upper = partial.upper()
+
+    # Collect all enum values, same-package first
+    seen = set()
+    packages_order: list[str] = []
+    if current_package:
+        packages_order.append(current_package)
+
+    for pkg in packages_order:
+        for sym in indexer.index.by_package.get(pkg, []):
+            if sym.kind != SymbolKind.ENUM:
+                continue
+            for ev in sym.enum_values:
+                c_name = _enum_value_c_name(sym, ev)
+                if c_name.upper().startswith(partial_upper):
+                    val_str = f' = {ev.value}' if ev.value else ''
+                    items.append(lsp.CompletionItem(
+                        label=c_name,
+                        kind=lsp.CompletionItemKind.EnumMember,
+                        detail=f'{sym.qualified_name}{val_str}',
+                        documentation=ev.doc,
+                        sort_text=f'0:{c_name}',
+                    ))
+                    seen.add((sym.qualified_name, ev.name))
+
+    # Cross-package enum values
+    for sym in indexer.index.by_qualified_name.values():
+        if sym.kind != SymbolKind.ENUM:
+            continue
+        for ev in sym.enum_values:
+            if (sym.qualified_name, ev.name) in seen:
+                continue
+            c_name = _enum_value_c_name(sym, ev)
+            if c_name.upper().startswith(partial_upper):
+                val_str = f' = {ev.value}' if ev.value else ''
+                items.append(lsp.CompletionItem(
+                    label=c_name,
+                    kind=lsp.CompletionItemKind.EnumMember,
+                    detail=f'{sym.qualified_name}{val_str}',
+                    documentation=ev.doc,
+                    sort_text=f'2:{c_name}',
+                ))
+
+    return items
+
+
+def _complete_attribute(partial: str) -> list[lsp.CompletionItem]:
+    """Complete an attribute name after @."""
+    items: list[lsp.CompletionItem] = []
+    partial_lower = partial.lower()
+
+    for attr in _IOP_ATTRIBUTES:
+        if attr.lower().startswith(partial_lower):
+            items.append(lsp.CompletionItem(
+                label=attr,
+                kind=lsp.CompletionItemKind.Property,
+                sort_text=f'0:{attr}',
+            ))
+
+    return items
+
+
+def _complete_doc_tag(partial: str) -> list[lsp.CompletionItem]:
+    """Complete a doc comment tag after backslash."""
+    items: list[lsp.CompletionItem] = []
+    partial_lower = partial.lower()
+
+    for tag in _DOC_TAGS:
+        if tag.lower().startswith(partial_lower):
+            items.append(lsp.CompletionItem(
+                label=tag,
+                kind=lsp.CompletionItemKind.Keyword,
+                sort_text=f'0:{tag}',
+            ))
+
+    return items
+
+
+def _complete_doc_ref(
+    partial: str, current_package: Optional[str],
+) -> list[lsp.CompletionItem]:
+    """Complete a type name in doc comment reference position."""
+    items: list[lsp.CompletionItem] = []
+    partial_lower = partial.lower()
+    seen = set()
+
+    # Same-package types first
+    if current_package:
+        for sym in indexer.index.by_package.get(current_package, []):
+            if sym.name.lower().startswith(partial_lower):
+                items.append(lsp.CompletionItem(
+                    label=sym.name,
+                    kind=_IOP_TO_COMPLETION_KIND.get(
+                        sym.kind, lsp.CompletionItemKind.Struct,
+                    ),
+                    detail=sym.package,
+                    sort_text=f'0:{sym.name}',
+                ))
+                seen.add(sym.qualified_name)
+
+    # Cross-package types
+    for qname, sym in indexer.index.by_qualified_name.items():
+        if qname in seen:
+            continue
+        if sym.name.lower().startswith(partial_lower):
+            items.append(lsp.CompletionItem(
+                label=sym.qualified_name,
+                kind=_IOP_TO_COMPLETION_KIND.get(
+                    sym.kind, lsp.CompletionItemKind.Struct,
+                ),
+                detail=sym.package,
+                sort_text=f'2:{sym.name}',
+            ))
+
+    return items
+
+
+@server.feature(
+    lsp.TEXT_DOCUMENT_COMPLETION,
+    lsp.CompletionOptions(trigger_characters=['.', '\\', '@']),
+)
+def completion(
+    params: lsp.CompletionParams,
+) -> Optional[list[lsp.CompletionItem]]:
+    uri = params.text_document.uri
+    line = params.position.line
+    col = params.position.character
+
+    doc = server.workspace.get_text_document(uri)
+    doc_text = doc.source
+
+    context_kind, partial, pkg_prefix = _get_completion_context(
+        doc_text, line, col,
+    )
+
+    current_package = _get_package_for_uri(uri)
+
+    if context_kind == 'attribute':
+        items = _complete_attribute(partial)
+    elif context_kind == 'doc_tag':
+        items = _complete_doc_tag(partial)
+    elif context_kind == 'doc_ref':
+        items = _complete_doc_ref(partial, current_package)
+    elif context_kind == 'qualified_type':
+        items = _complete_qualified_type(pkg_prefix, partial)
+    elif context_kind == 'enum_value':
+        items = _complete_enum_value(partial, current_package)
+    elif context_kind == 'field_type':
+        items = _complete_field_type(partial, current_package)
+    else:
+        return None
+
+    return items or None
 
 
 def _format_symbol_hover(sym: Symbol) -> str:

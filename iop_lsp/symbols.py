@@ -77,3 +77,5 @@ class Symbol:
     typedef_source: Optional[str] = None
     # @ctype override (e.g., 'http_code__t')
     ctype: Optional[str] = None
+    # @prefix override for enums (e.g., 'A' for @prefix(A))
+    enum_prefix: Optional[str] = None

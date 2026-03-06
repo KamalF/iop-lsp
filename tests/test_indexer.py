@@ -1067,5 +1067,249 @@ class TestFindReferences(unittest.TestCase):
         self.assertEqual(len(refs), 2)
 
 
+class TestCompletion(unittest.TestCase):
+    """Tests for completion context detection and candidate generation."""
+
+    def setUp(self):
+        self.indexer = Indexer()
+        # Patch the module-level indexer used by completion functions
+        import iop_lsp.server as srv
+        self._orig_indexer = srv.indexer
+        srv.indexer = self.indexer
+
+    def tearDown(self):
+        import iop_lsp.server as srv
+        srv.indexer = self._orig_indexer
+
+    def _index_source(self, source: str, filename: str = '/test.iop'):
+        self.indexer.index_source(filename, source.encode('utf-8'))
+
+    # --- Context detection tests ---
+
+    def test_context_attribute(self):
+        from iop_lsp.server import _get_completion_context
+        ctx, partial, pkg = _get_completion_context(
+            'package foo;\n@str', 1, 4,
+        )
+        self.assertEqual(ctx, 'attribute')
+        self.assertEqual(partial, 'str')
+
+    def test_context_attribute_empty(self):
+        from iop_lsp.server import _get_completion_context
+        ctx, partial, pkg = _get_completion_context(
+            'package foo;\n@', 1, 1,
+        )
+        self.assertEqual(ctx, 'attribute')
+        self.assertEqual(partial, '')
+
+    def test_context_doc_tag(self):
+        from iop_lsp.server import _get_completion_context
+        src = '/** \\re'
+        ctx, partial, pkg = _get_completion_context(src, 0, 7)
+        self.assertEqual(ctx, 'doc_tag')
+        self.assertEqual(partial, 're')
+
+    def test_context_doc_ref(self):
+        from iop_lsp.server import _get_completion_context
+        src = '/** \\ref My'
+        ctx, partial, pkg = _get_completion_context(src, 0, 11)
+        self.assertEqual(ctx, 'doc_ref')
+        self.assertEqual(partial, 'My')
+
+    def test_context_qualified_type(self):
+        from iop_lsp.server import _get_completion_context
+        src = 'package foo;\nstruct Bar {\n    pkg.My'
+        ctx, partial, pkg = _get_completion_context(src, 2, 10)
+        self.assertEqual(ctx, 'qualified_type')
+        self.assertEqual(partial, 'My')
+        self.assertEqual(pkg, 'pkg')
+
+    def test_context_enum_value(self):
+        from iop_lsp.server import _get_completion_context
+        src = 'package foo;\nstruct S {\n    int x = LOG_L'
+        ctx, partial, pkg = _get_completion_context(src, 2, 17)
+        self.assertEqual(ctx, 'enum_value')
+        self.assertEqual(partial, 'LOG_L')
+
+    def test_context_field_type(self):
+        from iop_lsp.server import _get_completion_context
+        src = 'package foo;\nstruct S {\n    My'
+        ctx, partial, pkg = _get_completion_context(src, 2, 6)
+        self.assertEqual(ctx, 'field_type')
+        self.assertEqual(partial, 'My')
+
+    def test_context_field_type_empty(self):
+        from iop_lsp.server import _get_completion_context
+        src = 'package foo;\nstruct S {\n    '
+        ctx, partial, pkg = _get_completion_context(src, 2, 4)
+        self.assertEqual(ctx, 'field_type')
+        self.assertEqual(partial, '')
+
+    def test_context_none_outside_block(self):
+        from iop_lsp.server import _get_completion_context
+        src = 'package foo;\n'
+        ctx, partial, pkg = _get_completion_context(src, 0, 12)
+        self.assertEqual(ctx, 'none')
+
+    # --- Candidate generation tests ---
+
+    def test_field_type_includes_builtins(self):
+        from iop_lsp.server import _complete_field_type
+        items = _complete_field_type('in', None)
+        labels = [i.label for i in items]
+        self.assertIn('int', labels)
+
+    def test_field_type_includes_indexed_types(self):
+        from iop_lsp.server import _complete_field_type
+        self._index_source(
+            'package foo;\nstruct MyStruct {};', '/a.iop',
+        )
+        items = _complete_field_type('My', 'foo')
+        labels = [i.label for i in items]
+        self.assertIn('MyStruct', labels)
+
+    def test_field_type_same_package_sorts_first(self):
+        from iop_lsp.server import _complete_field_type
+        self._index_source(
+            'package foo;\nstruct Target {};', '/a.iop',
+        )
+        self._index_source(
+            'package bar;\nstruct Target {};', '/b.iop',
+        )
+        items = _complete_field_type('Target', 'foo')
+        # Same-package item should have sort_text starting with '0:'
+        same_pkg = [i for i in items if i.sort_text.startswith('0:')]
+        cross_pkg = [i for i in items if i.sort_text.startswith('2:')]
+        self.assertTrue(len(same_pkg) >= 1)
+        self.assertTrue(len(cross_pkg) >= 1)
+
+    def test_field_type_cross_package_insert_text(self):
+        from iop_lsp.server import _complete_field_type
+        self._index_source(
+            'package other;\nstruct Remote {};', '/a.iop',
+        )
+        items = _complete_field_type('Remote', 'foo')
+        remote_items = [i for i in items if i.label == 'Remote']
+        self.assertTrue(len(remote_items) >= 1)
+        self.assertEqual(remote_items[0].insert_text, 'other.Remote')
+
+    def test_qualified_type_filters_package(self):
+        from iop_lsp.server import _complete_qualified_type
+        self._index_source(
+            'package pkg;\nstruct Alpha {};\nstruct Beta {};',
+            '/a.iop',
+        )
+        self._index_source(
+            'package other;\nstruct Gamma {};', '/b.iop',
+        )
+        items = _complete_qualified_type('pkg', '')
+        labels = [i.label for i in items]
+        self.assertIn('Alpha', labels)
+        self.assertIn('Beta', labels)
+        self.assertNotIn('Gamma', labels)
+
+    def test_enum_value_candidates(self):
+        from iop_lsp.server import _complete_enum_value
+        self._index_source(
+            'package foo;\n'
+            'enum LogLevel {\n'
+            '    INFO = 0,\n'
+            '    DEBUG = 1,\n'
+            '};',
+        )
+        items = _complete_enum_value('LOG_LEVEL_', 'foo')
+        labels = [i.label for i in items]
+        self.assertIn('LOG_LEVEL_INFO', labels)
+        self.assertIn('LOG_LEVEL_DEBUG', labels)
+
+    def test_enum_value_c_name_format(self):
+        """Enum values use C-style names: UPPER_SNAKE(EnumName)_VALUE."""
+        from iop_lsp.server import _complete_enum_value
+        self._index_source(
+            'package foo;\n'
+            'enum IcPriority {\n'
+            '    LOW,\n'
+            '    NORMAL,\n'
+            '    HIGH,\n'
+            '};',
+        )
+        items = _complete_enum_value('IC_PRIORITY_', 'foo')
+        labels = [i.label for i in items]
+        self.assertIn('IC_PRIORITY_LOW', labels)
+        self.assertIn('IC_PRIORITY_NORMAL', labels)
+        self.assertIn('IC_PRIORITY_HIGH', labels)
+
+    def test_enum_value_with_prefix_attr(self):
+        """@prefix overrides the enum name prefix."""
+        from iop_lsp.server import _complete_enum_value
+        self._index_source(
+            'package foo;\n'
+            '@prefix(A)\n'
+            'enum MyEnumA {\n'
+            '    X = 0,\n'
+            '    Y = 1,\n'
+            '};',
+        )
+        items = _complete_enum_value('A_', 'foo')
+        labels = [i.label for i in items]
+        self.assertIn('A_X', labels)
+        self.assertIn('A_Y', labels)
+        # Should NOT have the default prefix
+        all_labels = [i.label for i in _complete_enum_value('MY_ENUM_A_', 'foo')]
+        self.assertEqual(len(all_labels), 0)
+
+    def test_enum_value_no_match(self):
+        from iop_lsp.server import _complete_enum_value
+        self._index_source(
+            'package foo;\nenum E { A, };',
+        )
+        items = _complete_enum_value('ZZZ', 'foo')
+        self.assertEqual(len(items), 0)
+
+    def test_attribute_candidates(self):
+        from iop_lsp.server import _complete_attribute
+        items = _complete_attribute('')
+        labels = [i.label for i in items]
+        self.assertIn('strict', labels)
+        self.assertIn('deprecated', labels)
+        self.assertIn('ctype', labels)
+
+    def test_attribute_filtered(self):
+        from iop_lsp.server import _complete_attribute
+        items = _complete_attribute('str')
+        labels = [i.label for i in items]
+        self.assertIn('strict', labels)
+        self.assertNotIn('deprecated', labels)
+
+    def test_doc_tag_candidates(self):
+        from iop_lsp.server import _complete_doc_tag
+        items = _complete_doc_tag('')
+        labels = [i.label for i in items]
+        self.assertIn('ref', labels)
+        self.assertIn('see', labels)
+        self.assertIn('param', labels)
+
+    def test_doc_ref_candidates(self):
+        from iop_lsp.server import _complete_doc_ref
+        self._index_source(
+            'package foo;\nstruct MyType {};', '/a.iop',
+        )
+        items = _complete_doc_ref('My', 'foo')
+        labels = [i.label for i in items]
+        self.assertIn('MyType', labels)
+
+    def test_field_type_empty_partial(self):
+        from iop_lsp.server import _complete_field_type
+        self._index_source(
+            'package foo;\nstruct Bar {};', '/a.iop',
+        )
+        items = _complete_field_type('', 'foo')
+        labels = [i.label for i in items]
+        # Should include builtins and indexed types
+        self.assertIn('int', labels)
+        self.assertIn('string', labels)
+        self.assertIn('Bar', labels)
+
+
 if __name__ == '__main__':
     unittest.main()
