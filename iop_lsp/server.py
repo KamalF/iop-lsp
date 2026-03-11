@@ -872,13 +872,13 @@ def _complete_field_type(
             continue
         if sym.name.lower().startswith(partial_lower):
             items.append(lsp.CompletionItem(
-                label=sym.name,
+                label=sym.qualified_name,
+                filter_text=sym.name,
                 kind=_IOP_TO_COMPLETION_KIND.get(
                     sym.kind, lsp.CompletionItemKind.Struct,
                 ),
                 detail=sym.package,
                 documentation=sym.doc,
-                insert_text=sym.qualified_name,
                 sort_text=f'2:{sym.name}',
             ))
 
