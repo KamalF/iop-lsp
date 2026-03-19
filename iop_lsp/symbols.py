@@ -37,6 +37,7 @@ class FieldSymbol:
     range: Range
     doc: Optional[str]
     full_range: Optional[Range] = None  # Range of the entire field node
+    type_range: Optional[Range] = None  # Range of the type name token
 
 
 @dataclass
@@ -48,6 +49,9 @@ class RpcSymbol:
     range: Range
     doc: Optional[str]
     full_range: Optional[Range] = None  # Range of the entire rpc node
+    in_type_range: Optional[Range] = None
+    out_type_range: Optional[Range] = None
+    throw_type_range: Optional[Range] = None
 
 
 @dataclass
@@ -75,6 +79,9 @@ class Symbol:
     rpcs: list[RpcSymbol] = field(default_factory=list)
     # For typedef: the source type
     typedef_source: Optional[str] = None
+    typedef_source_range: Optional[Range] = None
+    # For class: range of the parent class name token
+    parent_class_range: Optional[Range] = None
     # @ctype override (e.g., 'http_code__t')
     ctype: Optional[str] = None
     # @prefix override for enums (e.g., 'A' for @prefix(A))

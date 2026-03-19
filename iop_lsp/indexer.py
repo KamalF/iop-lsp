@@ -327,11 +327,13 @@ class Indexer:
 
         # Parent class for class definitions
         parent_class = None
+        parent_class_range = None
         if node.type == 'class_definition':
             for inh in _find_children(node, 'class_inheritance'):
                 inh_id = _find_identifier(inh)
                 if inh_id:
                     parent_class = _node_text(inh_id)
+                    parent_class_range = _node_range(inh_id)
 
         # Parse @ctype and @prefix attributes if present
         ctype = self._extract_attr_value(node, 'ctype')
@@ -346,6 +348,7 @@ class Indexer:
             doc=doc,
             package=package,
             parent_class=parent_class,
+            parent_class_range=parent_class_range,
             full_range=_node_range(node),
             ctype=ctype,
             enum_prefix=enum_prefix,
@@ -381,6 +384,7 @@ class Indexer:
                 type_node = _find_child(var, 'type')
                 if type_node:
                     sym.typedef_source = _node_text(type_node)
+                    sym.typedef_source_range = _node_range(type_node)
 
         return sym
 
@@ -431,6 +435,7 @@ class Indexer:
                     ),
                     doc=get_field_doc_comment(child),
                     full_range=_node_range(child),
+                    type_range=_node_range(type_node) if type_node else None,
                 ))
         return fields
 
@@ -473,16 +478,26 @@ class Indexer:
                 rpc_out = _find_child(child, 'rpc_out')
                 rpc_throw = _find_child(child, 'rpc_throw')
 
+                in_type, in_type_range = self._extract_rpc_type_info(rpc_in)
+                out_type, out_type_range = self._extract_rpc_type_info(
+                    rpc_out
+                )
+                throw_type, throw_type_range = self._extract_rpc_type_info(
+                    rpc_throw
+                )
                 rpcs.append(RpcSymbol(
                     name=_node_text(id_node) or '',
-                    in_type=self._extract_rpc_type_ref(rpc_in),
-                    out_type=self._extract_rpc_type_ref(rpc_out),
-                    throw_type=self._extract_rpc_type_ref(rpc_throw),
+                    in_type=in_type,
+                    out_type=out_type,
+                    throw_type=throw_type,
                     range=_node_range(id_node) if id_node else _node_range(
                         child
                     ),
                     doc=doc,
                     full_range=_node_range(child),
+                    in_type_range=in_type_range,
+                    out_type_range=out_type_range,
+                    throw_type_range=throw_type_range,
                 ))
         return rpcs
 
@@ -490,19 +505,33 @@ class Indexer:
         self, rpc_clause: Optional[ts.Node],
     ) -> Optional[str]:
         """Extract a single-type reference from rpc in/out/throw."""
+        ref, _ = self._extract_rpc_type_info(rpc_clause)
+        return ref
+
+    def _extract_rpc_type_info(
+        self, rpc_clause: Optional[ts.Node],
+    ) -> tuple[Optional[str], Optional[Range]]:
+        """Extract (type_ref, range) from rpc in/out/throw."""
         if rpc_clause is None:
-            return None
+            return None, None
         # If it has an argument_list, it's an inline struct, no single ref
         if _find_child(rpc_clause, 'argument_list'):
-            return None
+            return None, None
+        type_node = _find_child(rpc_clause, 'type')
+        if type_node:
+            text = _node_text(type_node)
+            if text and text not in BUILTIN_TYPES and text not in (
+                'null', 'void'
+            ):
+                return text, _node_range(type_node)
         id_node = _find_identifier(rpc_clause)
         if id_node:
             text = _node_text(id_node)
             if text and text not in BUILTIN_TYPES and text not in (
                 'null', 'void'
             ):
-                return text
-        return None
+                return text, _node_range(id_node)
+        return None, None
 
     def _extract_module_fields(
         self, block: ts.Node,

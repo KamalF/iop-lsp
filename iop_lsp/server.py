@@ -4,19 +4,17 @@ from __future__ import annotations
 
 import argparse
 import logging
-import os
 import re
 from typing import Optional
 
 import tree_sitter as ts
-import tree_sitter_iop as tsiop
 from lsprotocol import types as lsp
 from pygls.lsp.server import LanguageServer
 
 from .c_mapping import camelcase_to_c
 from .indexer import BUILTIN_TYPES, IOP_LANGUAGE, Indexer, _find_child
 from .symbols import (
-    EnumValueSymbol, FieldSymbol, RpcSymbol, Symbol, SymbolKind,
+    EnumValueSymbol, Symbol, SymbolKind,
 )
 
 log = logging.getLogger(__name__)
@@ -360,12 +358,14 @@ def did_open(params: lsp.DidOpenTextDocumentParams) -> None:
     path = _uri_to_path(params.text_document.uri)
     source = params.text_document.text.encode('utf-8')
     indexer.index_source(path, source)
+    _publish_diagnostics(params.text_document.uri)
 
 
 @server.feature(lsp.TEXT_DOCUMENT_DID_SAVE)
 def did_save(params: lsp.DidSaveTextDocumentParams) -> None:
     path = _uri_to_path(params.text_document.uri)
     indexer.index_file(path)
+    _publish_diagnostics(params.text_document.uri)
 
 
 @server.feature(lsp.TEXT_DOCUMENT_DID_CHANGE)
@@ -377,6 +377,7 @@ def did_change(params: lsp.DidChangeTextDocumentParams) -> None:
     path = _uri_to_path(params.text_document.uri)
     source = doc.source.encode('utf-8')
     indexer.index_source(path, source)
+    _publish_diagnostics(params.text_document.uri)
 
 
 def _find_references_in_file(
@@ -1191,10 +1192,65 @@ def _symbol_to_location(sym: Symbol) -> lsp.Location:
 
 
 def _range_to_lsp(r) -> lsp.Range:
-    from .symbols import Range as IopRange
     return lsp.Range(
         start=lsp.Position(line=r.start_line, character=r.start_col),
         end=lsp.Position(line=r.end_line, character=r.end_col),
+    )
+
+
+def _publish_diagnostics(uri: str) -> None:
+    """Validate type references in a file and publish diagnostics."""
+    path = _uri_to_path(uri)
+    symbols = indexer.index.by_file.get(path, [])
+    package = indexer.index.package_of_file.get(path)
+    diagnostics: list[lsp.Diagnostic] = []
+
+    for sym in symbols:
+        # Check parent class reference
+        if sym.parent_class and sym.parent_class_range:
+            if indexer.index.resolve(sym.parent_class, package) is None:
+                diagnostics.append(_unresolved_type_diag(
+                    sym.parent_class, sym.parent_class_range,
+                ))
+
+        # Check typedef source type
+        if (sym.typedef_source and sym.typedef_source_range
+                and sym.typedef_source not in BUILTIN_TYPES):
+            if indexer.index.resolve(sym.typedef_source, package) is None:
+                diagnostics.append(_unresolved_type_diag(
+                    sym.typedef_source, sym.typedef_source_range,
+                ))
+
+        # Check field type references
+        for fld in sym.fields:
+            if fld.type_ref and fld.type_range:
+                if indexer.index.resolve(fld.type_ref, package) is None:
+                    diagnostics.append(_unresolved_type_diag(
+                        fld.type_ref, fld.type_range,
+                    ))
+
+        # Check RPC type references
+        for rpc in sym.rpcs:
+            for type_ref, type_range in (
+                (rpc.in_type, rpc.in_type_range),
+                (rpc.out_type, rpc.out_type_range),
+                (rpc.throw_type, rpc.throw_type_range),
+            ):
+                if type_ref and type_range:
+                    if indexer.index.resolve(type_ref, package) is None:
+                        diagnostics.append(_unresolved_type_diag(
+                            type_ref, type_range,
+                        ))
+
+    server.publish_diagnostics(uri, diagnostics)
+
+
+def _unresolved_type_diag(type_ref: str, r) -> lsp.Diagnostic:
+    return lsp.Diagnostic(
+        range=_range_to_lsp(r),
+        message=f"Unknown type '{type_ref}'",
+        severity=lsp.DiagnosticSeverity.Error,
+        source='iop-lsp',
     )
 
 
