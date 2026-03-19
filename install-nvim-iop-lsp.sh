@@ -120,7 +120,7 @@ if has('nvim')
 lua << EOF
   -- Start iop-lsp for .iop, .yaml, and .json files.
   vim.api.nvim_create_autocmd('FileType', {
-    pattern = { 'iop', 'yaml', 'json' },
+    pattern = { 'iop', 'c' },
     callback = function()
       vim.lsp.start({
         name = 'iop-lsp',

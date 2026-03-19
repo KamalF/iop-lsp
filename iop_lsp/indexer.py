@@ -333,8 +333,9 @@ class Indexer:
                 if inh_id:
                     parent_class = _node_text(inh_id)
 
-        # Parse @ctype attribute if present
-        ctype = self._extract_ctype(node)
+        # Parse @ctype and @prefix attributes if present
+        ctype = self._extract_attr_value(node, 'ctype')
+        enum_prefix = self._extract_attr_value(node, 'prefix')
 
         sym = Symbol(
             name=name,
@@ -345,7 +346,9 @@ class Indexer:
             doc=doc,
             package=package,
             parent_class=parent_class,
+            full_range=_node_range(node),
             ctype=ctype,
+            enum_prefix=enum_prefix,
         )
 
         # Extract children based on kind
@@ -381,14 +384,15 @@ class Indexer:
 
         return sym
 
-    def _extract_ctype(self, node: ts.Node) -> Optional[str]:
-        """Extract @ctype(name) attribute value from a definition node."""
+    def _extract_attr_value(
+        self, node: ts.Node, attr_name: str,
+    ) -> Optional[str]:
+        """Extract @attr_name(value) from a definition node."""
         for child in node.children:
             if child.type != 'attribute':
                 continue
-            # attribute children: '@', identifier?, attribute_argument_list?
             attr_id = _find_child(child, 'identifier')
-            if attr_id and _node_text(attr_id) == 'ctype':
+            if attr_id and _node_text(attr_id) == attr_name:
                 arg_list = _find_child(child, 'attribute_argument_list')
                 if arg_list:
                     content = _find_child(arg_list, 'attribute_content')
@@ -426,6 +430,7 @@ class Indexer:
                         child
                     ),
                     doc=get_field_doc_comment(child),
+                    full_range=_node_range(child),
                 ))
         return fields
 
@@ -453,6 +458,7 @@ class Indexer:
                         child
                     ),
                     doc=doc,
+                    full_range=_node_range(child),
                 ))
         return values
 
@@ -476,6 +482,7 @@ class Indexer:
                         child
                     ),
                     doc=doc,
+                    full_range=_node_range(child),
                 ))
         return rpcs
 
@@ -514,5 +521,6 @@ class Indexer:
                         default_value=None,
                         range=_node_range(name_id),
                         doc=get_field_doc_comment(child),
+                        full_range=_node_range(child),
                     ))
         return fields

@@ -620,5 +620,696 @@ class TestDocComments(unittest.TestCase):
         self.assertIsNone(sym.doc)
 
 
+class TestDocumentSymbols(unittest.TestCase):
+    """Tests for document symbol generation."""
+
+    def setUp(self):
+        self.indexer = Indexer()
+
+    def _index_source(self, source: str, filename: str = '/test.iop'):
+        self.indexer.index_source(filename, source.encode('utf-8'))
+
+    def test_full_range_populated_on_symbol(self):
+        self._index_source(
+            'package foo;\n'
+            'struct Bar {\n'
+            '    int x;\n'
+            '};'
+        )
+        sym = self.indexer.index.by_qualified_name['foo.Bar']
+        self.assertIsNotNone(sym.full_range)
+        # full_range should span the entire struct definition
+        self.assertGreater(
+            sym.full_range.end_line - sym.full_range.start_line,
+            0,
+        )
+        # range (identifier) should be within full_range
+        self.assertGreaterEqual(
+            sym.range.start_line, sym.full_range.start_line,
+        )
+
+    def test_full_range_populated_on_field(self):
+        self._index_source(
+            'package foo;\n'
+            'struct Bar {\n'
+            '    int x;\n'
+            '};'
+        )
+        sym = self.indexer.index.by_qualified_name['foo.Bar']
+        field = sym.fields[0]
+        self.assertIsNotNone(field.full_range)
+
+    def test_full_range_populated_on_enum_value(self):
+        self._index_source(
+            'package foo;\n'
+            'enum Color {\n'
+            '    RED = 0,\n'
+            '};'
+        )
+        sym = self.indexer.index.by_qualified_name['foo.Color']
+        ev = sym.enum_values[0]
+        self.assertIsNotNone(ev.full_range)
+
+    def test_full_range_populated_on_rpc(self):
+        self._index_source(
+            'package foo;\n'
+            'interface Svc {\n'
+            '    doStuff\n'
+            '        in void\n'
+            '        out void;\n'
+            '};'
+        )
+        sym = self.indexer.index.by_qualified_name['foo.Svc']
+        rpc = sym.rpcs[0]
+        self.assertIsNotNone(rpc.full_range)
+
+    def test_document_symbol_conversion(self):
+        """Test _symbol_to_document_symbol produces correct hierarchy."""
+        from iop_lsp.server import _symbol_to_document_symbol
+        self._index_source(
+            'package foo;\n'
+            'struct MyStruct {\n'
+            '    int x;\n'
+            '    string name;\n'
+            '};'
+        )
+        sym = self.indexer.index.by_qualified_name['foo.MyStruct']
+        doc_sym = _symbol_to_document_symbol(sym)
+        self.assertEqual(doc_sym.name, 'MyStruct')
+        from lsprotocol import types as lsp
+        self.assertEqual(doc_sym.kind, lsp.SymbolKind.Struct)
+        self.assertIsNotNone(doc_sym.children)
+        self.assertEqual(len(doc_sym.children), 2)
+        self.assertEqual(doc_sym.children[0].name, 'x')
+        self.assertEqual(doc_sym.children[0].kind, lsp.SymbolKind.Field)
+        self.assertEqual(doc_sym.children[1].name, 'name')
+
+    def test_document_symbol_enum_children(self):
+        from iop_lsp.server import _symbol_to_document_symbol
+        from lsprotocol import types as lsp
+        self._index_source(
+            'package foo;\n'
+            'enum Color {\n'
+            '    RED = 0,\n'
+            '    GREEN = 1,\n'
+            '};'
+        )
+        sym = self.indexer.index.by_qualified_name['foo.Color']
+        doc_sym = _symbol_to_document_symbol(sym)
+        self.assertEqual(doc_sym.kind, lsp.SymbolKind.Enum)
+        self.assertEqual(len(doc_sym.children), 2)
+        self.assertEqual(
+            doc_sym.children[0].kind, lsp.SymbolKind.EnumMember,
+        )
+
+    def test_document_symbol_interface_children(self):
+        from iop_lsp.server import _symbol_to_document_symbol
+        from lsprotocol import types as lsp
+        self._index_source(
+            'package foo;\n'
+            'interface Svc {\n'
+            '    doStuff\n'
+            '        in void\n'
+            '        out void;\n'
+            '};'
+        )
+        sym = self.indexer.index.by_qualified_name['foo.Svc']
+        doc_sym = _symbol_to_document_symbol(sym)
+        self.assertEqual(doc_sym.kind, lsp.SymbolKind.Interface)
+        self.assertEqual(len(doc_sym.children), 1)
+        self.assertEqual(
+            doc_sym.children[0].kind, lsp.SymbolKind.Method,
+        )
+
+    def test_document_symbol_no_children(self):
+        from iop_lsp.server import _symbol_to_document_symbol
+        self._index_source(
+            'package foo;\n'
+            'typedef int[] IntArray;'
+        )
+        sym = self.indexer.index.by_qualified_name['foo.IntArray']
+        doc_sym = _symbol_to_document_symbol(sym)
+        self.assertIsNone(doc_sym.children)
+
+
+class TestWorkspaceSymbols(unittest.TestCase):
+    """Tests for workspace symbol search."""
+
+    def setUp(self):
+        self.indexer = Indexer()
+
+    def _index_source(self, source: str, filename: str = '/test.iop'):
+        self.indexer.index_source(filename, source.encode('utf-8'))
+
+    def test_empty_query_returns_all(self):
+        from iop_lsp.server import _IOP_TO_LSP_KIND
+        self._index_source(
+            'package foo;\n'
+            'struct Bar {};\n'
+            'enum Baz { X, };',
+        )
+        # Simulate workspace symbol search
+        results = self._search('')
+        self.assertEqual(len(results), 2)
+
+    def test_substring_match(self):
+        self._index_source(
+            'package foo;\n'
+            'struct MyStruct {};\n'
+            'struct OtherThing {};',
+        )
+        results = self._search('struct')
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].name, 'MyStruct')
+
+    def test_case_insensitive(self):
+        self._index_source(
+            'package foo;\n'
+            'struct MyStruct {};',
+        )
+        results = self._search('MYSTRUCT')
+        self.assertEqual(len(results), 1)
+
+    def test_prefix_matches_first(self):
+        self._index_source(
+            'package foo;\n'
+            'struct ABar {};\n'
+            'struct BarA {};',
+        )
+        results = self._search('bar')
+        self.assertEqual(len(results), 2)
+        # BarA starts with 'bar', so it should come first
+        self.assertEqual(results[0].name, 'BarA')
+
+    def test_limit_100(self):
+        # Create 150 symbols
+        lines = ['package foo;']
+        for i in range(150):
+            lines.append(f'struct S{i} {{}};')
+        self._index_source('\n'.join(lines))
+        results = self._search('')
+        self.assertLessEqual(len(results), 100)
+
+    def test_no_match_returns_none(self):
+        self._index_source('package foo;\nstruct Bar {};')
+        results = self._search('zzzzz')
+        self.assertIsNone(results)
+
+    def test_container_name_is_package(self):
+        self._index_source('package mypackage;\nstruct Foo {};')
+        results = self._search('foo')
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].container_name, 'mypackage')
+
+    def _search(self, query: str):
+        """Simulate workspace symbol search using the indexer."""
+        from lsprotocol import types as lsp
+        from iop_lsp.server import _IOP_TO_LSP_KIND
+
+        query_lower = query.lower()
+        results = []
+        prefix_matches = []
+
+        for sym in self.indexer.index.by_qualified_name.values():
+            name_lower = sym.name.lower()
+            if query_lower and query_lower not in name_lower:
+                continue
+
+            lsp_kind = _IOP_TO_LSP_KIND.get(
+                sym.kind, lsp.SymbolKind.Object,
+            )
+            info = lsp.SymbolInformation(
+                name=sym.name,
+                kind=lsp_kind,
+                location=lsp.Location(
+                    uri=f'file://{sym.file}',
+                    range=lsp.Range(
+                        start=lsp.Position(
+                            line=sym.range.start_line,
+                            character=sym.range.start_col,
+                        ),
+                        end=lsp.Position(
+                            line=sym.range.end_line,
+                            character=sym.range.end_col,
+                        ),
+                    ),
+                ),
+                container_name=sym.package,
+            )
+
+            if query_lower and name_lower.startswith(query_lower):
+                prefix_matches.append(info)
+            else:
+                results.append(info)
+
+        combined = prefix_matches + results
+        return combined[:100] if combined else None
+
+
+class TestFindReferences(unittest.TestCase):
+    """Tests for Find References functionality."""
+
+    def setUp(self):
+        self.indexer = Indexer()
+        self.parser = __import__(
+            'tree_sitter', fromlist=['Parser']
+        ).Parser(
+            __import__(
+                'iop_lsp.indexer', fromlist=['IOP_LANGUAGE']
+            ).IOP_LANGUAGE
+        )
+
+    def _index_source(self, source: str, filename: str = '/test.iop'):
+        self.indexer.index_source(filename, source.encode('utf-8'))
+
+    def _find_refs(self, source: str, target_names: set,
+                   filename: str = '/test.iop'):
+        from iop_lsp.server import _find_references_in_file
+        return _find_references_in_file(
+            filename, source.encode('utf-8'), target_names,
+        )
+
+    def test_field_type_reference(self):
+        source = (
+            'package foo;\n'
+            'struct Color {};\n'
+            'struct Painted {\n'
+            '    Color color;\n'
+            '};'
+        )
+        refs = self._find_refs(source, {'Color'})
+        self.assertEqual(len(refs), 1)
+        self.assertEqual(refs[0].range.start.line, 3)
+
+    def test_rpc_type_references(self):
+        source = (
+            'package foo;\n'
+            'struct Req {};\n'
+            'struct Resp {};\n'
+            'struct Err {};\n'
+            'interface Svc {\n'
+            '    call\n'
+            '        in Req\n'
+            '        out Resp\n'
+            '        throw Err;\n'
+            '};'
+        )
+        refs = self._find_refs(source, {'Req'})
+        self.assertEqual(len(refs), 1)
+        refs = self._find_refs(source, {'Resp'})
+        self.assertEqual(len(refs), 1)
+        refs = self._find_refs(source, {'Err'})
+        self.assertEqual(len(refs), 1)
+
+    def test_class_inheritance_reference(self):
+        source = (
+            'package foo;\n'
+            'class Base : 1 {};\n'
+            'class Child : 2 : Base {};'
+        )
+        refs = self._find_refs(source, {'Base'})
+        self.assertEqual(len(refs), 1)
+        # Should be on line 2 (Child : Base)
+        self.assertEqual(refs[0].range.start.line, 2)
+
+    def test_typedef_source_reference(self):
+        source = (
+            'package foo;\n'
+            'struct MyStruct {};\n'
+            'typedef MyStruct MyAlias;'
+        )
+        refs = self._find_refs(source, {'MyStruct'})
+        self.assertEqual(len(refs), 1)
+        self.assertEqual(refs[0].range.start.line, 2)
+
+    def test_cross_file_references(self):
+        self._index_source(
+            'package foo;\nstruct SharedType {};',
+            '/a.iop',
+        )
+        self._index_source(
+            'package bar;\nstruct User {\n    SharedType ref;\n};',
+            '/b.iop',
+        )
+        sym = self.indexer.index.by_qualified_name['foo.SharedType']
+
+        # Find refs in file b
+        refs = self._find_refs(
+            'package bar;\nstruct User {\n    SharedType ref;\n};',
+            {'SharedType', 'foo.SharedType'},
+            '/b.iop',
+        )
+        self.assertEqual(len(refs), 1)
+
+    def test_module_field_type_reference(self):
+        source = (
+            'package foo;\n'
+            'interface Log {};\n'
+            'module MyMod {\n'
+            '    Log logger;\n'
+            '};'
+        )
+        refs = self._find_refs(source, {'Log'})
+        # Should find the type ref (Log) but not the field name (logger)
+        self.assertEqual(len(refs), 1)
+        self.assertEqual(refs[0].range.start.line, 3)
+
+    def test_module_field_name_not_matched(self):
+        """Field name in module_field should not be reported as reference."""
+        source = (
+            'package foo;\n'
+            'interface Log {};\n'
+            'module MyMod {\n'
+            '    Log Log;\n'  # type and name both 'Log'
+            '};'
+        )
+        refs = self._find_refs(source, {'Log'})
+        # Should find only the type (first identifier), not the name
+        self.assertEqual(len(refs), 1)
+
+    def test_include_declaration_true(self):
+        self._index_source(
+            'package foo;\n'
+            'struct Target {};\n'
+            'struct User {\n    Target t;\n};',
+        )
+        sym = self.indexer.index.by_qualified_name['foo.Target']
+        from iop_lsp.server import _find_references_in_file
+        # Manually build what _find_all_references would do
+        target_names = {sym.name, sym.qualified_name}
+        from iop_lsp.server import _symbol_to_location
+        locations = [_symbol_to_location(sym)]
+        source = (
+            'package foo;\n'
+            'struct Target {};\n'
+            'struct User {\n    Target t;\n};'
+        )
+        locations.extend(
+            _find_references_in_file(
+                '/test.iop', source.encode('utf-8'), target_names,
+            )
+        )
+        # Declaration + 1 usage
+        self.assertEqual(len(locations), 2)
+
+    def test_include_declaration_false(self):
+        self._index_source(
+            'package foo;\n'
+            'struct Target {};\n'
+            'struct User {\n    Target t;\n};',
+        )
+        sym = self.indexer.index.by_qualified_name['foo.Target']
+        from iop_lsp.server import _find_references_in_file
+        target_names = {sym.name, sym.qualified_name}
+        source = (
+            'package foo;\n'
+            'struct Target {};\n'
+            'struct User {\n    Target t;\n};'
+        )
+        locations = _find_references_in_file(
+            '/test.iop', source.encode('utf-8'), target_names,
+        )
+        # Only usage, no declaration
+        self.assertEqual(len(locations), 1)
+
+    def test_no_matches_returns_empty(self):
+        source = (
+            'package foo;\n'
+            'struct A {\n'
+            '    int x;\n'
+            '};'
+        )
+        refs = self._find_refs(source, {'NonExistent'})
+        self.assertEqual(len(refs), 0)
+
+    def test_qualified_name_reference(self):
+        source = (
+            'package foo;\n'
+            'struct User {\n'
+            '    pkg.TypeName field;\n'
+            '};'
+        )
+        refs = self._find_refs(source, {'pkg.TypeName'})
+        self.assertEqual(len(refs), 1)
+
+    def test_multiple_references_in_same_file(self):
+        source = (
+            'package foo;\n'
+            'struct Color {};\n'
+            'struct A {\n'
+            '    Color x;\n'
+            '};\n'
+            'struct B {\n'
+            '    Color y;\n'
+            '};'
+        )
+        refs = self._find_refs(source, {'Color'})
+        self.assertEqual(len(refs), 2)
+
+
+class TestCompletion(unittest.TestCase):
+    """Tests for completion context detection and candidate generation."""
+
+    def setUp(self):
+        self.indexer = Indexer()
+        # Patch the module-level indexer used by completion functions
+        import iop_lsp.server as srv
+        self._orig_indexer = srv.indexer
+        srv.indexer = self.indexer
+
+    def tearDown(self):
+        import iop_lsp.server as srv
+        srv.indexer = self._orig_indexer
+
+    def _index_source(self, source: str, filename: str = '/test.iop'):
+        self.indexer.index_source(filename, source.encode('utf-8'))
+
+    # --- Context detection tests ---
+
+    def test_context_attribute(self):
+        from iop_lsp.server import _get_completion_context
+        ctx, partial, pkg = _get_completion_context(
+            'package foo;\n@str', 1, 4,
+        )
+        self.assertEqual(ctx, 'attribute')
+        self.assertEqual(partial, 'str')
+
+    def test_context_attribute_empty(self):
+        from iop_lsp.server import _get_completion_context
+        ctx, partial, pkg = _get_completion_context(
+            'package foo;\n@', 1, 1,
+        )
+        self.assertEqual(ctx, 'attribute')
+        self.assertEqual(partial, '')
+
+    def test_context_doc_tag(self):
+        from iop_lsp.server import _get_completion_context
+        src = '/** \\re'
+        ctx, partial, pkg = _get_completion_context(src, 0, 7)
+        self.assertEqual(ctx, 'doc_tag')
+        self.assertEqual(partial, 're')
+
+    def test_context_doc_ref(self):
+        from iop_lsp.server import _get_completion_context
+        src = '/** \\ref My'
+        ctx, partial, pkg = _get_completion_context(src, 0, 11)
+        self.assertEqual(ctx, 'doc_ref')
+        self.assertEqual(partial, 'My')
+
+    def test_context_qualified_type(self):
+        from iop_lsp.server import _get_completion_context
+        src = 'package foo;\nstruct Bar {\n    pkg.My'
+        ctx, partial, pkg = _get_completion_context(src, 2, 10)
+        self.assertEqual(ctx, 'qualified_type')
+        self.assertEqual(partial, 'My')
+        self.assertEqual(pkg, 'pkg')
+
+    def test_context_enum_value(self):
+        from iop_lsp.server import _get_completion_context
+        src = 'package foo;\nstruct S {\n    int x = LOG_L'
+        ctx, partial, pkg = _get_completion_context(src, 2, 17)
+        self.assertEqual(ctx, 'enum_value')
+        self.assertEqual(partial, 'LOG_L')
+
+    def test_context_field_type(self):
+        from iop_lsp.server import _get_completion_context
+        src = 'package foo;\nstruct S {\n    My'
+        ctx, partial, pkg = _get_completion_context(src, 2, 6)
+        self.assertEqual(ctx, 'field_type')
+        self.assertEqual(partial, 'My')
+
+    def test_context_field_type_empty(self):
+        from iop_lsp.server import _get_completion_context
+        src = 'package foo;\nstruct S {\n    '
+        ctx, partial, pkg = _get_completion_context(src, 2, 4)
+        self.assertEqual(ctx, 'field_type')
+        self.assertEqual(partial, '')
+
+    def test_context_none_outside_block(self):
+        from iop_lsp.server import _get_completion_context
+        src = 'package foo;\n'
+        ctx, partial, pkg = _get_completion_context(src, 0, 12)
+        self.assertEqual(ctx, 'none')
+
+    # --- Candidate generation tests ---
+
+    def test_field_type_includes_builtins(self):
+        from iop_lsp.server import _complete_field_type
+        items = _complete_field_type('in', None)
+        labels = [i.label for i in items]
+        self.assertIn('int', labels)
+
+    def test_field_type_includes_indexed_types(self):
+        from iop_lsp.server import _complete_field_type
+        self._index_source(
+            'package foo;\nstruct MyStruct {};', '/a.iop',
+        )
+        items = _complete_field_type('My', 'foo')
+        labels = [i.label for i in items]
+        self.assertIn('MyStruct', labels)
+
+    def test_field_type_same_package_sorts_first(self):
+        from iop_lsp.server import _complete_field_type
+        self._index_source(
+            'package foo;\nstruct Target {};', '/a.iop',
+        )
+        self._index_source(
+            'package bar;\nstruct Target {};', '/b.iop',
+        )
+        items = _complete_field_type('Target', 'foo')
+        # Same-package item should have sort_text starting with '0:'
+        same_pkg = [i for i in items if i.sort_text.startswith('0:')]
+        cross_pkg = [i for i in items if i.sort_text.startswith('2:')]
+        self.assertTrue(len(same_pkg) >= 1)
+        self.assertTrue(len(cross_pkg) >= 1)
+
+    def test_field_type_cross_package_insert_text(self):
+        from iop_lsp.server import _complete_field_type
+        self._index_source(
+            'package other;\nstruct Remote {};', '/a.iop',
+        )
+        items = _complete_field_type('Remote', 'foo')
+        remote_items = [i for i in items if i.label == 'Remote']
+        self.assertTrue(len(remote_items) >= 1)
+        self.assertEqual(remote_items[0].insert_text, 'other.Remote')
+
+    def test_qualified_type_filters_package(self):
+        from iop_lsp.server import _complete_qualified_type
+        self._index_source(
+            'package pkg;\nstruct Alpha {};\nstruct Beta {};',
+            '/a.iop',
+        )
+        self._index_source(
+            'package other;\nstruct Gamma {};', '/b.iop',
+        )
+        items = _complete_qualified_type('pkg', '')
+        labels = [i.label for i in items]
+        self.assertIn('Alpha', labels)
+        self.assertIn('Beta', labels)
+        self.assertNotIn('Gamma', labels)
+
+    def test_enum_value_candidates(self):
+        from iop_lsp.server import _complete_enum_value
+        self._index_source(
+            'package foo;\n'
+            'enum LogLevel {\n'
+            '    INFO = 0,\n'
+            '    DEBUG = 1,\n'
+            '};',
+        )
+        items = _complete_enum_value('LOG_LEVEL_', 'foo')
+        labels = [i.label for i in items]
+        self.assertIn('LOG_LEVEL_INFO', labels)
+        self.assertIn('LOG_LEVEL_DEBUG', labels)
+
+    def test_enum_value_c_name_format(self):
+        """Enum values use C-style names: UPPER_SNAKE(EnumName)_VALUE."""
+        from iop_lsp.server import _complete_enum_value
+        self._index_source(
+            'package foo;\n'
+            'enum IcPriority {\n'
+            '    LOW,\n'
+            '    NORMAL,\n'
+            '    HIGH,\n'
+            '};',
+        )
+        items = _complete_enum_value('IC_PRIORITY_', 'foo')
+        labels = [i.label for i in items]
+        self.assertIn('IC_PRIORITY_LOW', labels)
+        self.assertIn('IC_PRIORITY_NORMAL', labels)
+        self.assertIn('IC_PRIORITY_HIGH', labels)
+
+    def test_enum_value_with_prefix_attr(self):
+        """@prefix overrides the enum name prefix."""
+        from iop_lsp.server import _complete_enum_value
+        self._index_source(
+            'package foo;\n'
+            '@prefix(A)\n'
+            'enum MyEnumA {\n'
+            '    X = 0,\n'
+            '    Y = 1,\n'
+            '};',
+        )
+        items = _complete_enum_value('A_', 'foo')
+        labels = [i.label for i in items]
+        self.assertIn('A_X', labels)
+        self.assertIn('A_Y', labels)
+        # Should NOT have the default prefix
+        all_labels = [i.label for i in _complete_enum_value('MY_ENUM_A_', 'foo')]
+        self.assertEqual(len(all_labels), 0)
+
+    def test_enum_value_no_match(self):
+        from iop_lsp.server import _complete_enum_value
+        self._index_source(
+            'package foo;\nenum E { A, };',
+        )
+        items = _complete_enum_value('ZZZ', 'foo')
+        self.assertEqual(len(items), 0)
+
+    def test_attribute_candidates(self):
+        from iop_lsp.server import _complete_attribute
+        items = _complete_attribute('')
+        labels = [i.label for i in items]
+        self.assertIn('strict', labels)
+        self.assertIn('deprecated', labels)
+        self.assertIn('ctype', labels)
+
+    def test_attribute_filtered(self):
+        from iop_lsp.server import _complete_attribute
+        items = _complete_attribute('str')
+        labels = [i.label for i in items]
+        self.assertIn('strict', labels)
+        self.assertNotIn('deprecated', labels)
+
+    def test_doc_tag_candidates(self):
+        from iop_lsp.server import _complete_doc_tag
+        items = _complete_doc_tag('')
+        labels = [i.label for i in items]
+        self.assertIn('ref', labels)
+        self.assertIn('see', labels)
+        self.assertIn('param', labels)
+
+    def test_doc_ref_candidates(self):
+        from iop_lsp.server import _complete_doc_ref
+        self._index_source(
+            'package foo;\nstruct MyType {};', '/a.iop',
+        )
+        items = _complete_doc_ref('My', 'foo')
+        labels = [i.label for i in items]
+        self.assertIn('MyType', labels)
+
+    def test_field_type_empty_partial(self):
+        from iop_lsp.server import _complete_field_type
+        self._index_source(
+            'package foo;\nstruct Bar {};', '/a.iop',
+        )
+        items = _complete_field_type('', 'foo')
+        labels = [i.label for i in items]
+        # Should include builtins and indexed types
+        self.assertIn('int', labels)
+        self.assertIn('string', labels)
+        self.assertIn('Bar', labels)
+
+
 if __name__ == '__main__':
     unittest.main()
