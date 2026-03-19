@@ -29,4 +29,6 @@ tree-sitter-iop = { path = "../github/tree-sitter-iop" }
 
 [tool.ruff]
 line-length = 78
+
+[tool.ruff.format]
 quote-style = "single"
