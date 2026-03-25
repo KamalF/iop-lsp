@@ -1242,7 +1242,10 @@ def _publish_diagnostics(uri: str) -> None:
                             type_ref, type_range,
                         ))
 
-    server.publish_diagnostics(uri, diagnostics)
+    server.text_document_publish_diagnostics(lsp.PublishDiagnosticsParams(
+        uri=uri,
+        diagnostics=diagnostics,
+    ))
 
 
 def _unresolved_type_diag(type_ref: str, r) -> lsp.Diagnostic:
